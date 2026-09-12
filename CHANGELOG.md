@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.27.0]
+
 ### Fixed
 
 - Removed the type-dependency cycle heuristic that reported false `circular-containment` errors for valid referential usages and recursive composite type structures (#101). Feature typing does not establish ownership or an instance-composition cycle (SysML v2.0 sections 7.6.3 and 8.3.6.4). Circular-specialization validation remains enabled.
