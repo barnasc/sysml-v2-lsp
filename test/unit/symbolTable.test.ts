@@ -578,6 +578,58 @@ package InheritTest {
             expect(view!.viewFilters![0]).toContain('PartUsage');
         }
     });
+
+    it('should give an anonymous shorthand connection (spec 7.13.2) its own synthetic-named symbol', async () => {
+        // Companion to the "should not overwrite" case above: that one only asserts the source
+        // part usage is left alone; this one asserts the anonymous connection *itself* still gets
+        // a real symbol -- restoring, without reintroducing the old overwrite bug, what this
+        // project's own v0.26.0 fix (daltskin/VSCode_SysML_Extension#80) regressed: the shorthand
+        // `connect A to B;` / `connect (a, b, c);` notation is a fully valid, anonymous
+        // ConnectionUsage per the standard ("the keyword connection may be omitted" when there's
+        // no other declaration part) -- not something that should silently produce no symbol at
+        // all, e.g. for the InterconnectionView "wire" this connection represents.
+        const { st, result } = await buildST(`
+package Demo {
+    part def Source;
+    part def Sink;
+    part assembly {
+        part a : Source;
+        part b : Sink;
+        connect a.outP to b.inP;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const connections = st.getAllSymbols().filter(s => s.kind === 'connection');
+        expect(connections).toHaveLength(1);
+        expect(connections[0].name).toContain('a.outP');
+        expect(connections[0].name).toContain('b.inP');
+        expect(connections[0].parentQualifiedName).toBe('Demo::assembly');
+    });
+
+    it('should give an anonymous n-ary shorthand connection its own synthetic-named symbol', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def B;
+    part def C;
+    part assembly {
+        part x : A;
+        part y : B;
+        part z : C;
+        connect (x, y, z);
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const connections = st.getAllSymbols().filter(s => s.kind === 'connection');
+        expect(connections).toHaveLength(1);
+        expect(connections[0].name).toContain('x');
+        expect(connections[0].name).toContain('y');
+        expect(connections[0].name).toContain('z');
+    });
 });
 
 describe('Control nodes (fork/join/merge/decide)', () => {

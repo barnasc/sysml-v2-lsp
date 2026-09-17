@@ -693,13 +693,29 @@ export class SymbolTable {
         // Anonymous transitions still need symbols so their endpoints can be
         // exposed to diagram consumers. Give them a readable, location-based
         // synthetic name rather than incorrectly using the source state name.
-        const name = transition
-            ? transition.declaredName ?? (
-                transition.source && transition.target
+        const declaredName = transition ? transition.declaredName : this.extractName(ctx);
+        // Same reasoning for an anonymous ConnectionUsage: the shorthand `connect A to B;` /
+        // `connect (a, b, c);` notation (spec 7.13.2, "the keyword connection may be omitted" when
+        // there's no other declaration part) is a fully valid, anonymous connection usage with no
+        // name production at all -- not an error, and not something to silently drop. A
+        // collision-free, location-based synthetic name here restores a real symbol for it,
+        // without reintroducing the bug this project's own v0.26.0 fixed (an anonymous connection's
+        // identity overwriting its source part usage's own name) -- this name is a fresh string,
+        // never assigned to anything else.
+        const syntheticName = declaredName ? undefined
+            : transition
+                ? (transition.source && transition.target
                     ? `<transition ${transition.source} to ${transition.target}>#${range.start.line + 1}`
-                    : undefined
-            )
-            : this.extractName(ctx);
+                    : undefined)
+                : kind === SysMLElementKind.ConnectionUsage
+                    ? (() => {
+                        const endpoints = this.extractConnectionEndpoints(ctx);
+                        return endpoints.length >= 2
+                            ? `<connect ${endpoints.join(' to ')}>#${range.start.line + 1}`
+                            : undefined;
+                    })()
+                    : undefined;
+        const name = declaredName ?? syntheticName;
         if (!name) {
             return undefined;
         }
@@ -708,7 +724,7 @@ export class SymbolTable {
             ? `${parentQualifiedName}::${name}`
             : name;
 
-        const selectionRange = transition && !transition.declaredName
+        const selectionRange = syntheticName
             ? range
             : this.extractNameRange(ctx) ?? range;
         // Extract type names for both usages (typing) and definitions (specialization)
@@ -826,6 +842,34 @@ export class SymbolTable {
     private cleanTransitionText(text: string): string | undefined {
         const cleaned = text.replace(/'([^']+)'/g, '$1').trim();
         return cleaned || undefined;
+    }
+
+    /**
+     * The reference text of each end of a ConnectionUsage's shorthand `connect` notation (spec
+     * 7.13.2), in declaration order -- e.g. `["part2.p3", "part3.p4"]` for
+     * `connect part2.p3 to part3.p4;`, or all N for the n-ary `connect (a, b, c);` form. Each end
+     * (`connectorEndMember -> connectorEnd -> ownedReferenceSubsetting`) is the same rule shape
+     * `extractTransitionDetails` already reads for a transition's own source/target, reused here.
+     */
+    private extractConnectionEndpoints(ctx: ParserRuleContext): string[] {
+        const connectorPart = this.findFirstDescendant(ctx, SysMLv2Parser.RULE_connectorPart);
+        if (!connectorPart) return [];
+        const endpoints: string[] = [];
+        this.collectRuleTexts(connectorPart, SysMLv2Parser.RULE_ownedReferenceSubsetting, endpoints);
+        return endpoints;
+    }
+
+    /** First descendant of `ctx` (not including `ctx` itself) with the given rule index, depth-limited. */
+    private findFirstDescendant(ctx: ParserRuleContext, ruleIndex: number, depth = 0): ParserRuleContext | undefined {
+        if (depth > 8) return undefined; // connectorPart is a direct child (depth 1); generous margin, not exact-fit
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (!(child instanceof ParserRuleContext)) continue;
+            if (child.ruleIndex === ruleIndex) return child;
+            const found = this.findFirstDescendant(child, ruleIndex, depth + 1);
+            if (found) return found;
+        }
+        return undefined;
     }
 
     /** Extract explicit first/then successions owned by an action body. */
