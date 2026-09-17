@@ -1,11 +1,11 @@
 import { ParserRuleContext, TerminalNode, Token } from 'antlr4ng';
 import { Range } from 'vscode-languageserver/node';
-import { MultiplicityBoundsContext, SysMLv2Parser } from '../generated/SysMLv2Parser.js';
+import { MultiplicityBoundsContext, OwnedExpressionContext, SysMLv2Parser } from '../generated/SysMLv2Parser.js';
 import { ParseResult } from '../parser/parseDocument.js';
 import { contextToRange, tokenToRange } from '../parser/positionUtils.js';
 import { SYSML_KEYWORDS } from '../utils/sysmlKeywords.js';
 import { Scope } from './scope.js';
-import { SysMLElementKind, SysMLSymbol, isUsage as isUsageKind } from './sysmlElements.js';
+import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isUsage as isUsageKind } from './sysmlElements.js';
 
 // ── ruleIndex-based lookup tables ───────────────────────────────────
 // These replace the toLowerCase() + string-comparison chains with O(1)
@@ -729,6 +729,8 @@ export class SymbolTable {
         const viewFilters = (isView || isPackage) ? this.extractViewFilters(ctx) : undefined;
         const viewRendering = isView ? this.extractViewRendering(ctx) : undefined;
         const controlFlows = isAction ? this.extractControlFlows(ctx) : undefined;
+        const importTargets = isPackage ? this.extractImportTargets(ctx) : undefined;
+        const filterConditions = isPackage ? this.extractPackageFilterConditions(ctx) : undefined;
 
         return {
             name,
@@ -754,6 +756,8 @@ export class SymbolTable {
             exposeTargets: exposeTargets && exposeTargets.length > 0 ? exposeTargets : undefined,
             viewFilters: viewFilters && viewFilters.length > 0 ? viewFilters : undefined,
             viewRendering: viewRendering || undefined,
+            importTargets: importTargets && importTargets.length > 0 ? importTargets : undefined,
+            filterConditions: filterConditions && filterConditions.length > 0 ? filterConditions : undefined,
         };
     }
 
@@ -1413,6 +1417,217 @@ export class SymbolTable {
      */
     private isKeyword(text: string): boolean {
         return SYSML_KEYWORDS.has(text);
+    }
+
+    /**
+     * Extract `import` statements owned directly by a package's body.
+     * Imports are direct children of packageBody (not nested arbitrarily,
+     * unlike expose in view bodies), so only that one level is scanned.
+     */
+    private extractImportTargets(ctx: ParserRuleContext): ImportTarget[] {
+        const results: ImportTarget[] = [];
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (!(child instanceof ParserRuleContext) || child.ruleIndex !== SysMLv2Parser.RULE_packageBody) continue;
+            for (let j = 0; j < child.getChildCount(); j++) {
+                const bodyItem = child.getChild(j);
+                if (!(bodyItem instanceof ParserRuleContext) || bodyItem.ruleIndex !== SysMLv2Parser.RULE_packageBodyElement) continue;
+                for (let k = 0; k < bodyItem.getChildCount(); k++) {
+                    const maybeImportRule = bodyItem.getChild(k);
+                    if (maybeImportRule instanceof ParserRuleContext && maybeImportRule.ruleIndex === SysMLv2Parser.RULE_importRule) {
+                        const parsed = this.parseImportRule(maybeImportRule);
+                        if (parsed) results.push(parsed);
+                    }
+                }
+            }
+        }
+        return results;
+    }
+
+    /**
+     * Parse a single importRule context into an ImportTarget, distinguishing
+     * membership vs. namespace imports and shallow vs. `::**` deep imports.
+     */
+    private parseImportRule(importRuleCtx: ParserRuleContext): ImportTarget | undefined {
+        let declarationCtx: ParserRuleContext | undefined;
+        for (let i = 0; i < importRuleCtx.getChildCount(); i++) {
+            const child = importRuleCtx.getChild(i);
+            if (child instanceof ParserRuleContext && child.ruleIndex === SysMLv2Parser.RULE_importDeclaration) {
+                declarationCtx = child;
+                break;
+            }
+        }
+        if (!declarationCtx) return undefined;
+
+        const visibility = this.extractImportVisibility(importRuleCtx);
+
+        // Filtered import: `import Owner::Target[filterExpr];` (§7.5.4) -- namespaceImport's
+        // filterPackage alternative. Handled separately so its qualifiedName target and its
+        // [filterExpr] brackets aren't squashed together by generic text extraction below.
+        const filterPackageCtx = this.findRule(declarationCtx, SysMLv2Parser.RULE_filterPackage);
+        if (filterPackageCtx) return this.parseFilteredImport(filterPackageCtx, visibility);
+
+        const isNamespaceImport = this.containsRule(declarationCtx, SysMLv2Parser.RULE_namespaceImport);
+        let text = this.extractFullExposeText(declarationCtx);
+        if (!text) return undefined;
+
+        const deep = text.endsWith('::**');
+        if (deep) text = text.slice(0, -'::**'.length);
+
+        if (isNamespaceImport) {
+            // namespaceImport text is "Owner::*" (shallow) before the optional "::**" suffix.
+            const owner = text.endsWith('::*') ? text.slice(0, -'::*'.length) : text;
+            return { kind: deep ? 'namespace-deep' : 'namespace-shallow', target: owner, visibility };
+        }
+        return { kind: deep ? 'membership-deep' : 'membership', target: text, visibility };
+    }
+
+    /**
+     * Visibility keyword on an importRule (`public`/`private`/`protected import ...`).
+     * Defaults to 'private', the standard's default for imports (§7.5.3) -- unlike
+     * plain member declarations, which default to 'public'.
+     */
+    private extractImportVisibility(importRuleCtx: ParserRuleContext): 'public' | 'private' | 'protected' {
+        for (let i = 0; i < importRuleCtx.getChildCount(); i++) {
+            const child = importRuleCtx.getChild(i);
+            if (child instanceof ParserRuleContext && child.ruleIndex === SysMLv2Parser.RULE_visibilityIndicator) {
+                const text = child.getText();
+                if (text === 'public' || text === 'private' || text === 'protected') return text;
+            }
+        }
+        return 'private';
+    }
+
+    /**
+     * Whether `ctx` or any descendant (depth-limited) is of the given rule index.
+     */
+    private containsRule(ctx: ParserRuleContext, ruleIndex: number, depth = 0): boolean {
+        return this.findRule(ctx, ruleIndex, depth) !== undefined;
+    }
+
+    /**
+     * First descendant of `ctx` (or `ctx` itself) of the given rule index, depth-limited.
+     */
+    private findRule(ctx: ParserRuleContext, ruleIndex: number, depth = 0): ParserRuleContext | undefined {
+        if (ctx.ruleIndex === ruleIndex) return ctx;
+        if (depth > 6) return undefined;
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (child instanceof ParserRuleContext) {
+                const found = this.findRule(child, ruleIndex, depth + 1);
+                if (found) return found;
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Parse a filtered import (§7.5.4: `import Owner::Target[filterExpr];`),
+     * the grammar's `filterPackage` alternative of `namespaceImport`. Its
+     * target/kind come from the same membership/namespace-shallow logic as a
+     * plain import; one or more `[filterExpr]` brackets are AND'd together
+     * into a single `ImportTarget.filter`.
+     */
+    private parseFilteredImport(
+        filterPackageCtx: ParserRuleContext,
+        visibility: 'public' | 'private' | 'protected',
+    ): ImportTarget | undefined {
+        let importDeclCtx: ParserRuleContext | undefined;
+        const filterExprs: FilterExpr[] = [];
+        for (let i = 0; i < filterPackageCtx.getChildCount(); i++) {
+            const child = filterPackageCtx.getChild(i);
+            if (!(child instanceof ParserRuleContext)) continue;
+            if (child.ruleIndex === SysMLv2Parser.RULE_filterPackageImportDeclaration) {
+                importDeclCtx = child;
+            } else if (child.ruleIndex === SysMLv2Parser.RULE_filterPackageMember) {
+                const exprCtx = this.findRule(child, SysMLv2Parser.RULE_ownedExpression);
+                if (exprCtx) filterExprs.push(this.parseFilterExpression(exprCtx));
+            }
+        }
+        if (!importDeclCtx) return undefined;
+
+        const isNamespaceImport = this.containsRule(importDeclCtx, SysMLv2Parser.RULE_namespaceImportDirect);
+        let text = this.extractFullExposeText(importDeclCtx);
+        if (!text) return undefined;
+
+        const deep = text.endsWith('::**');
+        if (deep) text = text.slice(0, -'::**'.length);
+
+        const filter = filterExprs.length === 0
+            ? undefined
+            : filterExprs.reduce((left, right) => ({ kind: 'and', left, right }));
+
+        if (isNamespaceImport) {
+            const owner = text.endsWith('::*') ? text.slice(0, -'::*'.length) : text;
+            return { kind: deep ? 'namespace-deep' : 'namespace-shallow', target: owner, visibility, filter };
+        }
+        return { kind: deep ? 'membership-deep' : 'membership', target: text, visibility, filter };
+    }
+
+    /**
+     * Parse a `filter`/filtered-import boolean expression (§7.5.4) into a
+     * FilterExpr, from an `ownedExpression` parse tree. Only the metadata
+     * classification-test subset (`@Name`, `and`/`or`/`not`, simple
+     * parenthesization) is modeled -- anything else (attribute-value
+     * comparisons, etc.) parses to 'unsupported', which evaluates as passing.
+     */
+    private parseFilterExpression(ctx: ParserRuleContext): FilterExpr {
+        if (ctx.ruleIndex !== SysMLv2Parser.RULE_ownedExpression) return { kind: 'unsupported' };
+        const expr = ctx as OwnedExpressionContext;
+        const children = expr.ownedExpression();
+
+        if (expr.AND() && children.length === 2) {
+            return { kind: 'and', left: this.parseFilterExpression(children[0]), right: this.parseFilterExpression(children[1]) };
+        }
+        if (expr.OR() && children.length === 2) {
+            return { kind: 'or', left: this.parseFilterExpression(children[0]), right: this.parseFilterExpression(children[1]) };
+        }
+        if (expr.NOT() && children.length === 1) {
+            return { kind: 'not', expr: this.parseFilterExpression(children[0]) };
+        }
+        if ((expr.AT_SIGN() || expr.AT_AT()) && expr.typeReference() && children.length === 0) {
+            const qualifiedName = this.extractFullExposeText(expr.typeReference()!);
+            if (qualifiedName) {
+                const simpleName = qualifiedName.includes('::') ? qualifiedName.split('::').pop()! : qualifiedName;
+                return { kind: 'metadata', name: simpleName };
+            }
+        }
+        // Parenthesized grouping: baseExpression -> LPAREN sequenceExpressionList RPAREN
+        // with exactly one element, e.g. "(@Approval and @Deprecated)".
+        const base = expr.baseExpression();
+        if (base) {
+            const seqList = this.findRule(base, SysMLv2Parser.RULE_sequenceExpressionList, 1);
+            if (seqList && seqList.getChildCount() === 1) {
+                const inner = seqList.getChild(0);
+                if (inner instanceof ParserRuleContext) return this.parseFilterExpression(inner);
+            }
+        }
+        return { kind: 'unsupported' };
+    }
+
+    /**
+     * Package-level `filter <expr>;` conditions (§7.5.4), applying to every
+     * import of the package. Like imports, these are direct children of
+     * packageBody, not nested arbitrarily.
+     */
+    private extractPackageFilterConditions(ctx: ParserRuleContext): FilterExpr[] {
+        const results: FilterExpr[] = [];
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (!(child instanceof ParserRuleContext) || child.ruleIndex !== SysMLv2Parser.RULE_packageBody) continue;
+            for (let j = 0; j < child.getChildCount(); j++) {
+                const bodyItem = child.getChild(j);
+                if (!(bodyItem instanceof ParserRuleContext) || bodyItem.ruleIndex !== SysMLv2Parser.RULE_packageBodyElement) continue;
+                for (let k = 0; k < bodyItem.getChildCount(); k++) {
+                    const maybeFilterMember = bodyItem.getChild(k);
+                    if (maybeFilterMember instanceof ParserRuleContext && maybeFilterMember.ruleIndex === SysMLv2Parser.RULE_elementFilterMember) {
+                        const exprCtx = this.findRule(maybeFilterMember, SysMLv2Parser.RULE_ownedExpression);
+                        if (exprCtx) results.push(this.parseFilterExpression(exprCtx));
+                    }
+                }
+            }
+        }
+        return results;
     }
 
     /**
