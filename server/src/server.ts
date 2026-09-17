@@ -33,6 +33,8 @@ import { Worker } from 'node:worker_threads';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { DocumentManager } from './documentManager.js';
 import { getLibraryFileContent, initLibraryIndex } from './library/libraryIndex.js';
+import { ResolveReferencesProvider } from './model/resolveReferencesProvider.js';
+import type { SysMLResolveReferencesParams } from './model/resolveReferencesTypes.js';
 import { SysMLModelProvider } from './model/sysmlModelProvider.js';
 import type { SysMLModelParams } from './model/sysmlModelTypes.js';
 import { loadDFASnapshot } from './parser/dfaLoader.js';
@@ -74,6 +76,7 @@ const serverStartTime = Date.now();
 // Core services
 const documentManager = new DocumentManager();
 const modelProvider = new SysMLModelProvider(documentManager);
+const resolveReferencesProvider = new ResolveReferencesProvider(documentManager);
 const diagnosticsProvider = new DiagnosticsProvider(documentManager);
 const completionProvider = new CompletionProvider(documentManager);
 const hoverProvider = new HoverProvider(documentManager);
@@ -893,6 +896,18 @@ connection.onRequest('sysml/clearCache', () => {
  */
 connection.onRequest('sysml/libraryContent', (params: { uri: string }) => {
     return getLibraryFileContent(params?.uri) ?? null;
+});
+
+/**
+ * `sysml/resolveReferences` — batch-resolves `{ scopeQualifiedName, name }`
+ * reference lookups against the workspace symbol table, using the same
+ * namespace/import-aware resolution (`NamespaceResolver`) the `unresolved-type`
+ * diagnostic uses. For clients that need a reference's real qualified name
+ * (including one only reachable through an `import`, or defined in another
+ * document) without reimplementing §7.5 resolution themselves.
+ */
+connection.onRequest('sysml/resolveReferences', (params: SysMLResolveReferencesParams) => {
+    return resolveReferencesProvider.resolveReferences(params);
 });
 
 // --------------------------------------------------------------------------

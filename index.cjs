@@ -27,4 +27,11 @@ const mcpServerPath = path.join(__dirname, 'dist', 'server', 'mcpServer.js');
  */
 const browserServerPath = path.join(__dirname, 'dist', 'server', 'browserServerMain.js');
 
-module.exports = { serverPath, workerPath, mcpServerPath, browserServerPath };
+/**
+ * Strips a `/* ... *\/` comment/doc body per KerML §8.2.3.3.2 (leading whitespace, then per-line
+ * indentation + an optional `*` gutter marker + one optional space). Does not flow multi-line
+ * bodies into a single line — see the exported function's own doc comment for details.
+ */
+const { cleanDocumentationText } = require('./dist/utils/documentationText.js');
+
+module.exports = { serverPath, workerPath, mcpServerPath, browserServerPath, cleanDocumentationText };

@@ -50,6 +50,16 @@ const mcpServerBuild = esbuild.build({
     external: ['vscode'],
 });
 
+// Bundle the standalone documentation-text cleanup util (KerML §8.2.3.3.2 gutter-stripping) —
+// zero dependencies, exported via index.cjs so consumers can
+// reuse the server's exact same rule instead of reimplementing it.
+const documentationTextBuild = esbuild.build({
+    ...baseConfig,
+    ...serverMinify,
+    entryPoints: ['server/src/symbols/documentationText.ts'],
+    outfile: 'dist/utils/documentationText.js',
+});
+
 // Bundle the client (full minification is safe here — no DFA side effects)
 const clientBuild = esbuild.build({
     ...baseConfig,
@@ -110,5 +120,5 @@ const browserServerBuild = esbuild.build({
     plugins: [browserPlatformPlugin],
 });
 
-await Promise.all([serverBuild, workerBuild, mcpServerBuild, clientBuild, browserServerBuild]);
+await Promise.all([serverBuild, workerBuild, mcpServerBuild, documentationTextBuild, clientBuild, browserServerBuild]);
 console.log(isProduction ? '✅ Production build complete' : '✅ Build complete');

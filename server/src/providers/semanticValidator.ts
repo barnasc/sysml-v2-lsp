@@ -2,75 +2,15 @@ import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver/node';
 import { DocumentManager } from '../documentManager.js';
 import { getLibraryPackageNames, resolveLibraryType } from '../library/libraryIndex.js';
 import { SysMLModelProvider } from '../model/sysmlModelProvider.js';
+import { NamespaceResolver, SymbolIndexes, buildSymbolIndexes } from '../symbols/namespaceResolver.js';
 import { SysMLElementKind, SysMLSymbol, isDefinition } from '../symbols/sysmlElements.js';
+import { resolveTypeName } from '../symbols/typeResolution.js';
 import { stripComments } from '../utils/identUtils.js';
-
-/**
- * Standard library types that are always available (from Kernel libraries).
- * These should not trigger "unresolved type" warnings.
- */
-const STANDARD_LIBRARY_TYPES = new Set([
-    // Kernel Data Types
-    'Boolean', 'String', 'Integer', 'Real', 'Natural', 'Positive',
-    'Complex', 'Number', 'Rational',
-    'ScalarValues', 'DataFunctions',
-    // Kernel Semantic Library
-    'Anything', 'Nothing', 'Object', 'Occurrence',
-    'Base', 'Objects', 'Occurrences', 'Items', 'Parts', 'Ports',
-    'Actions', 'States', 'Connections', 'Interfaces', 'Allocations',
-    'Requirements', 'Constraints', 'Calculations', 'Cases', 'Flows',
-    'Transfers', 'Performances', 'TransitionPerformances',
-    // Common library packages
-    'ISQ', 'SI', 'USCustomaryUnits',
-    'Quantities', 'MeasurementReferences', 'ScalarValues',
-    // StandardViewDefinitions (SysML v2 standard library)
-    'GeneralView', 'InterconnectionView', 'ActionFlowView',
-    'StateTransitionView', 'SequenceView', 'GeometryView',
-    'GridView', 'BrowserView', 'StandardViewDefinitions',
-    // Views library (rendering types)
-    'View', 'ViewpointCheck', 'Rendering',
-    'TextualRendering', 'GraphicalRendering', 'TabularRendering',
-    'Views',
-    // ISQ Base quantities (ISO 80000)
-    'LengthValue', 'MassValue', 'DurationValue', 'TimeValue',
-    'ElectricCurrentValue', 'ThermodynamicTemperatureValue', 'TemperatureValue',
-    'AmountOfSubstanceValue', 'LuminousIntensityValue',
-    // ISQ Derived quantities (commonly used)
-    'AreaValue', 'VolumeValue', 'SpeedValue', 'VelocityValue', 'AccelerationValue',
-    'ForceValue', 'EnergyValue', 'PowerValue', 'PressureValue',
-    'TorqueValue', 'MomentOfForceValue', 'AngularVelocityValue', 'FrequencyValue',
-    'DensityValue', 'MassFlowRateValue', 'VolumeFlowRateValue',
-    // ISQ units
-    'LengthUnit', 'MassUnit', 'DurationUnit', 'TimeUnit',
-]);
 
 const CONSTRAINT_KEYWORDS = new Set([
     'and', 'or', 'not', 'xor', 'implies', 'if', 'then', 'else', 'true', 'false', 'null',
     'require', 'constraint', 'subject', 'return', 'doc', 'comment', 'assert', 'assume',
 ]);
-
-interface SymbolIndexes {
-    byName: Map<string, SysMLSymbol[]>;
-    byParent: Map<string, SysMLSymbol[]>;
-    byQualifiedName: Map<string, SysMLSymbol>;
-    definitionsByName: Map<string, SysMLSymbol[]>;
-    portsByName: Map<string, SysMLSymbol[]>;
-}
-
-/**
- * Check for ISQ quantity value types (e.g., LengthValue, TorqueValue).
- * These start with an uppercase letter, contain only letters, and end in "Value".
- */
-function isISQValueType(name: string): boolean {
-    if (!name.endsWith('Value') || name.length < 6) return false;
-    const ch0 = name.charCodeAt(0);
-    if (ch0 < 65 || ch0 > 90) return false; // must start uppercase
-    for (let i = 1; i < name.length; i++) {
-        const c = name.charCodeAt(i);
-        if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122))) return false;
-    }
-    return true;
-}
 
 /**
  * Semantic validator for SysML v2 documents.
@@ -104,14 +44,15 @@ export class SemanticValidator {
         indexes: SymbolIndexes;
     };
 
-    /** Cached allSymbolNames set, keyed on allSymbols array identity. */
-    private symbolNamesCache?: {
-        symbols: SysMLSymbol[];
-        names: Set<string>;
-    };
-
     /** Cached library package names — never changes after init. */
     private libraryNamesCache?: Set<string>;
+
+    /** Namespace/import-aware name resolution (§7.5), shared with SysMLModelProvider's own diagnostics. */
+    private namespaceResolverInstance?: NamespaceResolver;
+    private get namespaceResolver(): NamespaceResolver {
+        if (!this.namespaceResolverInstance) this.namespaceResolverInstance = new NamespaceResolver();
+        return this.namespaceResolverInstance;
+    }
 
     constructor(private readonly documentManager: DocumentManager) {
         this.modelProvider = new SysMLModelProvider(documentManager);
@@ -162,16 +103,6 @@ export class SemanticValidator {
 
         const allSymbols = symbolTable.getAllSymbols();
 
-        // Cache allSymbolNames keyed on allSymbols array identity
-        // (getAllSymbols returns a cached array, only replaced on mutation).
-        let allSymbolNames: Set<string>;
-        if (this.symbolNamesCache && this.symbolNamesCache.symbols === allSymbols) {
-            allSymbolNames = this.symbolNamesCache.names;
-        } else {
-            allSymbolNames = new Set(allSymbols.map(s => s.name));
-            this.symbolNamesCache = { symbols: allSymbols, names: allSymbolNames };
-        }
-
         // Library names never change after server init — cache permanently.
         if (!this.libraryNamesCache) {
             this.libraryNamesCache = new Set(getLibraryPackageNames());
@@ -185,7 +116,7 @@ export class SemanticValidator {
 
         for (const symbol of symbols) {
             diagnostics.push(
-                ...this.checkUnresolvedType(symbol, allSymbolNames, libraryNames),
+                ...this.checkUnresolvedType(symbol, indexes, libraryNames),
                 ...this.checkInvalidMultiplicity(symbol),
                 ...this.checkEmptyEnum(symbol, symbols),
                 ...this.checkNamingConvention(symbol),
@@ -216,45 +147,14 @@ export class SemanticValidator {
      */
     private checkUnresolvedType(
         symbol: SysMLSymbol,
-        allSymbolNames: Set<string>,
+        indexes: SymbolIndexes,
         libraryNames: Set<string>,
     ): Diagnostic[] {
         if (!symbol.typeName) return [];
 
-        // Safety net: strip concatenated keywords that leak through when
-        // getText() merges "Type redefines foo" → "TyperedefinesFoo".
-        // The keyword must be followed by an uppercase letter (word boundary
-        // in camelCase concatenation) to avoid matching inside identifiers
-        // like "InterconnectionView" where "connect" is a substring.
-        let typeName = symbol.typeName;
-        const kwMatch = typeName.match(/^([A-Z][A-Za-z_0-9]*?)(redefines|subsets|references|connect|bind|default|via|accept|send|flow|allocate|assign|decide|merge|join|fork)([A-Z])/);
-        if (kwMatch) {
-            typeName = kwMatch[1];
-        }
-
-        // Resolve the root segment for qualified names (e.g., "ISQ::MassValue" → "ISQ")
-        const rootSegment = typeName.split('::')[0];
-
-        // Skip if the type is defined in the document, standard library, or indexed library packages
-        if (
-            allSymbolNames.has(typeName) ||
-            allSymbolNames.has(rootSegment) ||
-            STANDARD_LIBRARY_TYPES.has(typeName) ||
-            STANDARD_LIBRARY_TYPES.has(rootSegment) ||
-            libraryNames.has(rootSegment) ||
-            // Pattern match for ISQ quantity value types (e.g., LengthValue, TorqueValue)
-            isISQValueType(typeName) ||
-            // Check the scanned library type index (covers all ISQ/SI types including
-            // those with digits like CartesianSpatial3dCoordinateFrame)
-            resolveLibraryType(typeName) !== undefined ||
-            resolveLibraryType(rootSegment) !== undefined ||
-            // Names starting with lowercase are feature references (subsettings
-            // via :>), not type references — don't flag them as unresolved types.
-            // e.g. "attribute x :> distancePerVolume" references a feature, not a type.
-            (typeName.charCodeAt(0) >= 97 && typeName.charCodeAt(0) <= 122)
-        ) {
-            return [];
-        }
+        const { resolved, strippedTypeName: typeName } =
+            resolveTypeName(symbol.typeName, symbol, this.namespaceResolver, indexes, libraryNames);
+        if (resolved) return [];
 
         const isMandatory = symbol.multiplicityRange &&
             symbol.multiplicityRange.lower >= 1;
@@ -275,7 +175,7 @@ export class SemanticValidator {
             message,
             source: 'sysml',
             code: 'unresolved-type',
-            data: { typeName },
+            data: { typeName, elementName: symbol.name },
         }];
     }
 
@@ -477,11 +377,11 @@ export class SemanticValidator {
         const instance = Object.create(SemanticValidator.prototype) as SemanticValidator;
         const allSymbols = opts?.allSymbols ?? symbolsInUri;
         const includeStyleRules = opts?.includeStyleRules ?? true;
-        const indexes = instance.buildSymbolIndexes(allSymbols);
+        const indexes = buildSymbolIndexes(allSymbols);
 
         for (const symbol of symbolsInUri) {
             diagnostics.push(
-                ...instance.checkUnresolvedType(symbol, allNames, new Set()),
+                ...instance.checkUnresolvedType(symbol, indexes, new Set()),
                 ...instance.checkInvalidMultiplicity(symbol),
                 ...instance.checkEmptyEnum(symbol, symbolsInUri),
             );
@@ -1252,45 +1152,9 @@ export class SemanticValidator {
         if (this.indexCache && this.indexCache.symbols === allSymbols) {
             return this.indexCache.indexes;
         }
-        const indexes = this.buildSymbolIndexes(allSymbols);
+        const indexes = buildSymbolIndexes(allSymbols);
         this.indexCache = { symbols: allSymbols, indexes };
         return indexes;
-    }
-
-    private buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
-        const byName = new Map<string, SysMLSymbol[]>();
-        const byParent = new Map<string, SysMLSymbol[]>();
-        const byQualifiedName = new Map<string, SysMLSymbol>();
-        const definitionsByName = new Map<string, SysMLSymbol[]>();
-        const portsByName = new Map<string, SysMLSymbol[]>();
-
-        for (const s of allSymbols) {
-            const nameList = byName.get(s.name) ?? [];
-            nameList.push(s);
-            byName.set(s.name, nameList);
-
-            byQualifiedName.set(s.qualifiedName, s);
-
-            if (s.parentQualifiedName) {
-                const children = byParent.get(s.parentQualifiedName) ?? [];
-                children.push(s);
-                byParent.set(s.parentQualifiedName, children);
-            }
-
-            if (isDefinition(s.kind)) {
-                const defs = definitionsByName.get(s.name) ?? [];
-                defs.push(s);
-                definitionsByName.set(s.name, defs);
-            }
-
-            if (s.kind === SysMLElementKind.PortUsage || s.kind === SysMLElementKind.PortDef) {
-                const ports = portsByName.get(s.name) ?? [];
-                ports.push(s);
-                portsByName.set(s.name, ports);
-            }
-        }
-
-        return { byName, byParent, byQualifiedName, definitionsByName, portsByName };
     }
 
     private isConstraintKeyword(value: string): boolean {

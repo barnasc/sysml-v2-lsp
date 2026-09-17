@@ -36,6 +36,31 @@ describe('SysML Model Provider', () => {
     }
 
     /**
+     * Helper: build a model response for a target document, with one or more
+     * other documents also open in the same workspace (for cross-document
+     * import/namespace-visibility tests -- see the `diagnostics` describe
+     * block's cross-package cases).
+     */
+    async function getModelForDocuments(
+        entries: Array<{ uri: string; text: string }>,
+        targetUri: string,
+        scopes?: string[],
+    ) {
+        const { DocumentManager } = await import('../../server/src/documentManager.js');
+        const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+        const { TextDocument } = await import('vscode-languageserver-textdocument');
+
+        const docManager = new DocumentManager();
+        for (const entry of entries) {
+            docManager.parse(TextDocument.create(entry.uri, 'sysml', 1, entry.text));
+        }
+
+        const provider = new SysMLModelProvider(docManager);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return provider.getModel(targetUri, 1, scopes as any);
+    }
+
+    /**
      * Helper: build a model response for a fixture file.
      */
     async function getModelForFixture(fixturePath: string, scopes?: string[]) {
@@ -923,6 +948,48 @@ package Test {
             const unresolvedDiag = diags.find(d => d.code === 'unresolved-type');
             expect(unresolvedDiag).toBeDefined();
             expect(unresolvedDiag!.message).toContain('NonExistentType');
+        });
+
+        it('should flag a type defined only in an unrelated, unimported package (workspace-wide, not just this document)', async () => {
+            const pkgAText = `
+package PkgA {
+    part def Part3;
+}
+`;
+            const pkgBText = `
+package PkgB {
+    part def Part1;
+    part usesPart3 : Part3;
+}
+`;
+            const model = await getModelForDocuments(
+                [{ uri: 'file:///pkg-a.sysml', text: pkgAText }, { uri: 'file:///pkg-b.sysml', text: pkgBText }],
+                'file:///pkg-b.sysml',
+                ['diagnostics'],
+            );
+            const unresolvedDiag = model.diagnostics!.find(d => d.code === 'unresolved-type');
+            expect(unresolvedDiag).toBeDefined();
+            expect(unresolvedDiag!.message).toContain('Part3');
+        });
+
+        it('should NOT flag a type declared in a different document of the same workspace', async () => {
+            const pkgAText = `
+package Test {
+    part def Part1;
+}
+`;
+            const pkgBText = `
+package Test {
+    part usesPart1 : Part1;
+}
+`;
+            const model = await getModelForDocuments(
+                [{ uri: 'file:///a.sysml', text: pkgAText }, { uri: 'file:///b.sysml', text: pkgBText }],
+                'file:///b.sysml',
+                ['diagnostics'],
+            );
+            const unresolvedDiag = model.diagnostics!.find(d => d.code === 'unresolved-type');
+            expect(unresolvedDiag).toBeUndefined();
         });
 
         it('should include diagnostic range', async () => {
