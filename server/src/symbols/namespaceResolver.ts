@@ -110,35 +110,57 @@ export class NamespaceResolver {
     private resolvedMembersByIndexes?: WeakMap<SymbolIndexes, Map<string, Map<string, ResolvedMember[]>>>;
 
     /**
-     * Whether `name` (simple or qualified, e.g. `"Owner::Nested::Target"`) is
-     * resolvable from `symbol`'s reference site, per §7.5.1: "A qualified name
-     * with more than one segment is resolved by recursively resolving the
-     * name of the qualifying namespace and then resolving the element name in
-     * that context." A qualified name is *not* just "is the first segment
-     * visible" (a package name being resolvable doesn't mean every name after
-     * `::` is one of its actual members) -- each segment after the first must
-     * be a genuine member (owned or imported) of the previously-resolved
-     * namespace.
+     * Whether `name` is resolvable from `symbol`'s reference site -- see
+     * `resolve`'s own doc comment for the full §7.5.1 explanation. This is
+     * just `resolve(...) !== undefined`, kept as a separate method because
+     * most callers only care about a yes/no answer.
      */
     isLocallyVisible(symbol: SysMLSymbol, name: string, indexes: SymbolIndexes): boolean {
+        return this.resolve(symbol, name, indexes) !== undefined;
+    }
+
+    /**
+     * Resolves `name` (simple or qualified, e.g. `"Owner::Nested::Target"`)
+     * from `symbol`'s reference site to the symbol it refers to, per §7.5.1:
+     * "A qualified name with more than one segment is resolved by recursively
+     * resolving the name of the qualifying namespace and then resolving the
+     * element name in that context." A qualified name is *not* just "is the
+     * first segment visible" (a package name being resolvable doesn't mean
+     * every name after `::` is one of its actual members) -- each segment
+     * after the first must be a genuine member (owned or imported) of the
+     * previously-resolved namespace.
+     */
+    resolve(symbol: SysMLSymbol, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
+        return this.resolveFrom(symbol.parentQualifiedName ?? '', name, indexes);
+    }
+
+    /**
+     * Like `resolve`, but starting directly from a namespace's own qualified
+     * name (e.g. a package), rather than a reference-site symbol whose
+     * *parent* is the enclosing namespace. Use this when the caller already
+     * has "the namespace to resolve within" rather than a leaf symbol
+     * declared inside it -- `resolve(symbol, ...)` is just
+     * `resolveFrom(symbol.parentQualifiedName ?? '', ...)`.
+     */
+    resolveFrom(namespaceQualifiedName: string, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
         const [first, ...rest] = name.split('::');
 
-        let resolvedQualifiedName: string | undefined;
-        for (const ancestorQualifiedName of this.namespaceAncestors(symbol, indexes)) {
+        let resolved: SysMLSymbol | undefined;
+        for (const ancestorQualifiedName of this.namespaceAncestorsFrom(namespaceQualifiedName, indexes)) {
             const candidates = this.getResolvedMembers(ancestorQualifiedName, indexes).get(first);
             if (candidates && candidates.length > 0) {
-                resolvedQualifiedName = candidates[0].symbol.qualifiedName;
+                resolved = candidates[0].symbol;
                 break;
             }
         }
-        if (resolvedQualifiedName === undefined) return false;
+        if (resolved === undefined) return undefined;
 
         for (const segment of rest) {
-            const members = this.getResolvedMembers(resolvedQualifiedName, indexes).get(segment);
-            if (!members || members.length === 0) return false;
-            resolvedQualifiedName = members[0].symbol.qualifiedName;
+            const members = this.getResolvedMembers(resolved.qualifiedName, indexes).get(segment);
+            if (!members || members.length === 0) return undefined;
+            resolved = members[0].symbol;
         }
-        return true;
+        return resolved;
     }
 
     /**
@@ -147,8 +169,16 @@ export class NamespaceResolver {
      * Members of any of these are visible from `symbol` without an import.
      */
     namespaceAncestors(symbol: SysMLSymbol, indexes: SymbolIndexes): Set<string> {
+        return this.namespaceAncestorsFrom(symbol.parentQualifiedName ?? '', indexes);
+    }
+
+    /**
+     * Like `namespaceAncestors`, but starting from (and including) a
+     * namespace's own qualified name directly, rather than a symbol's parent.
+     */
+    namespaceAncestorsFrom(namespaceQualifiedName: string, indexes: SymbolIndexes): Set<string> {
         const ancestors = new Set<string>(['']);
-        let current = symbol.parentQualifiedName;
+        let current: string | undefined = namespaceQualifiedName || undefined;
         let guard = 0;
         while (current && guard++ < 64) {
             ancestors.add(current);
