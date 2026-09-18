@@ -29,6 +29,9 @@ export interface ResolvedMember {
     visibility: 'public' | 'private' | 'protected';
 }
 
+/** Permissiveness order for picking the effective visibility when the same element has more than one membership of a namespace (see `getResolvedMembers`'s `addMember`). */
+const VISIBILITY_RANK: Record<ResolvedMember['visibility'], number> = { public: 2, protected: 1, private: 0 };
+
 /** Build the byName/byParent/byQualifiedName/etc. indexes a `NamespaceResolver` (and other checks) need from a flat symbol array. */
 export function buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
     const byName = new Map<string, SysMLSymbol[]>();
@@ -121,24 +124,55 @@ export class NamespaceResolver {
      * namespace.
      */
     isLocallyVisible(symbol: SysMLSymbol, name: string, indexes: SymbolIndexes): boolean {
+        return this.resolveQualifiedNameFrom(symbol.parentQualifiedName, name, indexes) !== undefined;
+    }
+
+    /**
+     * Resolve a (possibly qualified) name to its symbol per §7.5.1, searching
+     * outward from `startQualifiedName`'s enclosing namespaces (its own resolved
+     * members first, then its parent's, ...). Shared by `isLocallyVisible` (an
+     * ordinary reference resolving relative to its own enclosing namespace) and
+     * import-target resolution (an `import` declaration's target is itself a
+     * qualifiedName, resolved the same relative way -- not as an absolute/global
+     * name -- so a bare `import C;` inside a nested package can pick up a `C`
+     * its own enclosing package already imported, per §7.5.1/§7.5.3).
+     */
+    private resolveQualifiedNameFrom(startQualifiedName: string | undefined, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
         const [first, ...rest] = name.split('::');
 
         let resolvedQualifiedName: string | undefined;
-        for (const ancestorQualifiedName of this.namespaceAncestors(symbol, indexes)) {
+        for (const ancestorQualifiedName of this.namespaceAncestorsOf(startQualifiedName, indexes)) {
             const candidates = this.getResolvedMembers(ancestorQualifiedName, indexes).get(first);
             if (candidates && candidates.length > 0) {
                 resolvedQualifiedName = candidates[0].symbol.qualifiedName;
                 break;
             }
         }
-        if (resolvedQualifiedName === undefined) return false;
+        if (resolvedQualifiedName === undefined) return undefined;
 
+        // A segment beyond the first isn't reached through the resolving
+        // context's own ancestor chain (unlike the first segment, found above
+        // by construction only in scopes enclosing `startQualifiedName`), so
+        // its membership visibility must actually be checked here: "private"
+        // means not visible outside the owning namespace (§7.5.2), and the
+        // owning namespace here is whatever the previous segment resolved to,
+        // not necessarily anything enclosing `startQualifiedName`. A private
+        // segment is still resolvable when `startQualifiedName` is itself
+        // that owning namespace or nested within it (querying your own, or an
+        // ancestor's, private members from inside is not "outside").
+        const isWithinStart = (namespaceQualifiedName: string): boolean =>
+            this.namespaceAncestorsOf(startQualifiedName, indexes).has(namespaceQualifiedName);
         for (const segment of rest) {
-            const members = this.getResolvedMembers(resolvedQualifiedName, indexes).get(segment);
-            if (!members || members.length === 0) return false;
-            resolvedQualifiedName = members[0].symbol.qualifiedName;
+            const ownerQualifiedName: string = resolvedQualifiedName;
+            const members: ResolvedMember[] | undefined = this.getResolvedMembers(ownerQualifiedName, indexes).get(segment);
+            const visibleMember: ResolvedMember | undefined = members?.find(
+                (m: ResolvedMember) => m.visibility === 'public' || isWithinStart(ownerQualifiedName),
+            );
+            if (!visibleMember) return undefined;
+            resolvedQualifiedName = visibleMember.symbol.qualifiedName;
         }
-        return true;
+        const finalQualifiedName: string = resolvedQualifiedName;
+        return indexes.byQualifiedName.get(finalQualifiedName);
     }
 
     /**
@@ -147,8 +181,13 @@ export class NamespaceResolver {
      * Members of any of these are visible from `symbol` without an import.
      */
     namespaceAncestors(symbol: SysMLSymbol, indexes: SymbolIndexes): Set<string> {
+        return this.namespaceAncestorsOf(symbol.parentQualifiedName, indexes);
+    }
+
+    /** As `namespaceAncestors`, but starting from a qualifiedName directly rather than a symbol's own parent. */
+    private namespaceAncestorsOf(startQualifiedName: string | undefined, indexes: SymbolIndexes): Set<string> {
         const ancestors = new Set<string>(['']);
-        let current = symbol.parentQualifiedName;
+        let current = startQualifiedName;
         let guard = 0;
         while (current && guard++ < 64) {
             ancestors.add(current);
@@ -181,9 +220,23 @@ export class NamespaceResolver {
         perIndexesCache.set(qualifiedName, new Map());
 
         const members = new Map<string, ResolvedMember[]>();
+        // If the same element reaches this namespace through more than one membership
+        // (e.g. two `import` statements for the same target -- across package fragments
+        // in different files, or just two imports in one file), each is a distinct
+        // membership (§7.5: "an element may have... multiple... memberships with the same
+        // namespace"); nothing merges them into one, so the element's effective visibility
+        // is the most permissive of them -- a public membership makes it visible outside
+        // regardless of a redundant private/protected one also existing. Keeping only the
+        // *first*-seen membership (as opposed to the most permissive) would make the result
+        // depend on import-processing order, which isn't a real distinction the model makes.
         const addMember = (name: string, entry: ResolvedMember) => {
             const list = members.get(name) ?? [];
-            if (!list.some(e => e.symbol === entry.symbol)) list.push(entry);
+            const existingIndex = list.findIndex(e => e.symbol === entry.symbol);
+            if (existingIndex === -1) {
+                list.push(entry);
+            } else if (VISIBILITY_RANK[entry.visibility] > VISIBILITY_RANK[list[existingIndex].visibility]) {
+                list[existingIndex] = entry;
+            }
             members.set(name, list);
         };
 
@@ -203,7 +256,7 @@ export class NamespaceResolver {
                     if (evaluateFilter(effectiveFilter, entry.symbol)) addMember(name, entry);
                 }
                 : addMember;
-            this.applyImport(imp, indexes, filteredAddMember);
+            this.applyImport(imp, owner?.parentQualifiedName, indexes, filteredAddMember);
         }
 
         perIndexesCache.set(qualifiedName, members);
@@ -214,32 +267,43 @@ export class NamespaceResolver {
      * Fold one `import` statement's contribution into `addMember`, per the
      * membership vs. namespace / shallow vs. `::**` deep distinctions in
      * ImportTarget (§7.5.3, including the P4/P5/P6 recursive-import example).
+     *
+     * `imp.target` is resolved relative to `fromQualifiedName` (the importing
+     * namespace's own enclosing scope), not as an absolute/global name: a bare
+     * `import C;` inside a nested package must be able to pick up a `C` that
+     * package's own enclosing package already imported (§7.5.1), the same way
+     * an ordinary type reference there would.
      */
     private applyImport(
         imp: ImportTarget,
+        fromQualifiedName: string | undefined,
         indexes: SymbolIndexes,
         addMember: (name: string, entry: ResolvedMember) => void,
     ): void {
         switch (imp.kind) {
             case 'membership': {
-                const target = indexes.byQualifiedName.get(imp.target);
+                const target = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
                 if (target) addMember(target.name, { symbol: target, visibility: imp.visibility });
                 break;
             }
             case 'membership-deep': {
-                const target = indexes.byQualifiedName.get(imp.target);
+                const target = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
                 if (target) {
                     addMember(target.name, { symbol: target, visibility: imp.visibility });
-                    this.importVisibleMembers(imp.target, imp.visibility, indexes, addMember, true);
+                    this.importVisibleMembers(target.qualifiedName, imp.visibility, indexes, addMember, true);
                 }
                 break;
             }
-            case 'namespace-shallow':
-                this.importVisibleMembers(imp.target, imp.visibility, indexes, addMember, false);
+            case 'namespace-shallow': {
+                const owner = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
+                if (owner) this.importVisibleMembers(owner.qualifiedName, imp.visibility, indexes, addMember, false);
                 break;
-            case 'namespace-deep':
-                this.importVisibleMembers(imp.target, imp.visibility, indexes, addMember, true);
+            }
+            case 'namespace-deep': {
+                const owner = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
+                if (owner) this.importVisibleMembers(owner.qualifiedName, imp.visibility, indexes, addMember, true);
                 break;
+            }
         }
     }
 

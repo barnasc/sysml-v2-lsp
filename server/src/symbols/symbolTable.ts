@@ -205,6 +205,8 @@ export class SymbolTable {
     private symbolsByPosition = new Map<string, SysMLSymbol[]>();
     /** Reverse index: type name → symbols that reference it in typeNames */
     private typeNameRefs = new Map<string, SysMLSymbol[]>();
+    /** Packages indexed by qualified name */
+    private packageFragmentsByQualifiedName = new Map<string, Map<string, SysMLSymbol>>();
     /** Cached array from getAllSymbols(), invalidated on any mutation */
     private allSymbolsCache: SysMLSymbol[] | undefined;
     /** The global scope */
@@ -382,7 +384,11 @@ export class SymbolTable {
             const affectedNames = new Set<string>();
             const affectedTypeNames = new Set<string>();
             for (const sym of existing) {
-                this.symbols.delete(sym.qualifiedName);
+                if (sym.kind === SysMLElementKind.Package) {
+                    this.unregisterPackageFragment(sym.qualifiedName, uri);
+                } else {
+                    this.symbols.delete(sym.qualifiedName);
+                }
                 affectedNames.add(sym.name);
                 for (const tn of sym.typeNames) {
                     affectedTypeNames.add(tn);
@@ -525,8 +531,56 @@ export class SymbolTable {
         }
     }
 
+    /**
+     * Fold every known fragment's importTargets/filterConditions for `qualifiedName`
+     * onto whichever fragment is currently the canonical `symbols` entry, so an
+     * `import`/`filter` declared in any one file of a multi-file package is visible
+     * regardless of which fragment `symbols.get(qualifiedName)` happens to return.
+     */
+    private mergePackageFragments(qualifiedName: string): void {
+        const fragments = this.packageFragmentsByQualifiedName.get(qualifiedName);
+        const canonical = this.symbols.get(qualifiedName);
+        if (!fragments || fragments.size === 0 || !canonical) return;
+
+        const importTargets: ImportTarget[] = [];
+        const filterConditions: FilterExpr[] = [];
+        for (const fragment of fragments.values()) {
+            if (fragment.importTargets) importTargets.push(...fragment.importTargets);
+            if (fragment.filterConditions) filterConditions.push(...fragment.filterConditions);
+        }
+        canonical.importTargets = importTargets.length > 0 ? importTargets : undefined;
+        canonical.filterConditions = filterConditions.length > 0 ? filterConditions : undefined;
+    }
+
+    /**
+     * Drop `uri`'s own fragment of package `qualifiedName` (on document edit/close).
+     * If other fragments remain, re-point the canonical `symbols` entry at one of
+     * them and re-merge; otherwise drop the package entirely, matching the plain
+     * (non-package) symbol removal this replaces for package-kind symbols.
+     */
+    private unregisterPackageFragment(qualifiedName: string, uri: string): void {
+        const fragments = this.packageFragmentsByQualifiedName.get(qualifiedName);
+        fragments?.delete(uri);
+        if (fragments && fragments.size > 0) {
+            this.symbols.set(qualifiedName, fragments.values().next().value!);
+            this.mergePackageFragments(qualifiedName);
+        } else {
+            this.packageFragmentsByQualifiedName.delete(qualifiedName);
+            this.symbols.delete(qualifiedName);
+        }
+    }
+
     private registerSymbol(symbol: SysMLSymbol, uri: string, scope: Scope): void {
         this.symbols.set(symbol.qualifiedName, symbol);
+        if (symbol.kind === SysMLElementKind.Package) {
+            let fragments = this.packageFragmentsByQualifiedName.get(symbol.qualifiedName);
+            if (!fragments) {
+                fragments = new Map();
+                this.packageFragmentsByQualifiedName.set(symbol.qualifiedName, fragments);
+            }
+            fragments.set(uri, symbol);
+            this.mergePackageFragments(symbol.qualifiedName);
+        }
         // Invalidate cached array
         this.allSymbolsCache = undefined;
         const uriSymbols = this.symbolsByUri.get(uri) ?? [];

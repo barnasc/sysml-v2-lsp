@@ -1200,6 +1200,53 @@ package PkgB {
             expect(unresolvedDiags.length).toBe(0);
         });
 
+        it('should combine imports from every fragment of a package split across files', async () => {
+            const pkgBFile1 = `
+package PkgB {
+    import PkgA::Part3;
+    part def Part1;
+}
+`;
+            const pkgBFile2 = `
+package PkgB {
+    part usesPart3 : Part3;
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [
+                    { uri: 'file:///pkg-a.sysml', text: pkgAText },
+                    { uri: 'file:///pkg-b-1.sysml', text: pkgBFile1 },
+                    { uri: 'file:///pkg-b-2.sysml', text: pkgBFile2 },
+                ],
+                'file:///pkg-b-2.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Part3'"))).toBe(false);
+        });
+
+        it('should still flag an unresolved reference when no fragment of the package imports it', async () => {
+            const pkgBFile1 = `
+package PkgB {
+    part def Part1;
+}
+`;
+            const pkgBFile2 = `
+package PkgB {
+    part usesPart3 : Part3;
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [
+                    { uri: 'file:///pkg-a.sysml', text: pkgAText },
+                    { uri: 'file:///pkg-b-1.sysml', text: pkgBFile1 },
+                    { uri: 'file:///pkg-b-2.sysml', text: pkgBFile2 },
+                ],
+                'file:///pkg-b-2.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Part3'"))).toBe(true);
+        });
+
         it('should resolve for non-part definition kinds too (attribute def, port def, interface def)', async () => {
             const libText = `
 package Lib {
@@ -1281,6 +1328,130 @@ package P2 {
             );
             const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
             expect(unresolvedDiags.some(d => d.message.includes("'C'"))).toBe(false);
+        });
+
+        it('should resolve a bare re-import relative to its enclosing namespace so it can itself be re-exported further', async () => {
+            const p1Text = `
+package P1 {
+    part def Part1;
+}
+`;
+            const p2Text = `
+package P2 {
+    private import P1::Part1;
+    package P2_2 {
+        public import Part1;
+    }
+}
+`;
+            const p3Text = `
+package P3 {
+    import P2::P2_2::Part1;
+    part usesPart1 : Part1;
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [
+                    { uri: 'file:///p1.sysml', text: p1Text },
+                    { uri: 'file:///p2.sysml', text: p2Text },
+                    { uri: 'file:///p3.sysml', text: p3Text },
+                ],
+                'file:///p3.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(false);
+        });
+
+        it('should NOT propagate a bare re-import to a further importer when declared private (default visibility)', async () => {
+            const p1Text = `
+package P1 {
+    part def Part1;
+}
+`;
+            const p2Text = `
+package P2 {
+    private import P1::Part1;
+    package P2_2 {
+        import Part1;
+    }
+}
+`;
+            const p3Text = `
+package P3 {
+    import P2::P2_2::Part1;
+    part usesPart1 : Part1;
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [
+                    { uri: 'file:///p1.sysml', text: p1Text },
+                    { uri: 'file:///p2.sysml', text: p2Text },
+                    { uri: 'file:///p3.sysml', text: p3Text },
+                ],
+                'file:///p3.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(true);
+        });
+
+        it('should NOT propagate a bare re-import to a further importer when declared protected', async () => {
+            const p1Text = `
+package P1 {
+    part def Part1;
+}
+`;
+            const p2Text = `
+package P2 {
+    private import P1::Part1;
+    package P2_2 {
+        protected import Part1;
+    }
+}
+`;
+            const p3Text = `
+package P3 {
+    import P2::P2_2::Part1;
+    part usesPart1 : Part1;
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [
+                    { uri: 'file:///p1.sysml', text: p1Text },
+                    { uri: 'file:///p2.sysml', text: p2Text },
+                    { uri: 'file:///p3.sysml', text: p3Text },
+                ],
+                'file:///p3.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(true);
+        });
+
+        it('should resolve a bare re-import within its own defining namespace regardless of the re-import\'s own visibility', async () => {
+            // A private/protected re-import still makes the name usable *inside*
+            // the package that declared it (and its own descendants) -- privacy
+            // only blocks a name from being re-exported one hop further out, per
+            // the propagation tests above. This isolates that from the "external
+            // package" scenario: no P3 here, just a reference inside P2_2 itself.
+            const p1Text = `
+package P1 {
+    part def Part1;
+}
+`;
+            const p2Text = `
+package P2 {
+    private import P1::Part1;
+    package P2_2 {
+        private import Part1;
+        part usesPart1 : Part1;
+    }
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [{ uri: 'file:///p1.sysml', text: p1Text }, { uri: 'file:///p2.sysml', text: p2Text }],
+                'file:///p2.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(false);
         });
 
         it('should follow recursive membership import into nested packages (standard §7.5.3 P4/P5 example)', async () => {
@@ -1429,6 +1600,81 @@ package PkgD {
             expect(unresolvedDiags.some(d => d.message.includes("'Part3'"))).toBe(true);
         });
 
+        describe('mixed-visibility duplicate imports of the same target (order-independence)', () => {
+            // §7.5: "an element may have... multiple... memberships with the same
+            // namespace" -- two `import` statements for the same target (here, across
+            // two files of the same split package) are two distinct memberships, not
+            // one that overwrites the other. The element's effective visibility must be
+            // the most permissive of the two, regardless of which file/fragment happens
+            // to be processed first -- a public import elsewhere in the same package
+            // isn't shadowed by a redundant private one just because of file order.
+            const p1Text = `
+package P1 {
+    part def Part1;
+}
+`;
+
+            it('propagates when the public import is in the fragment registered first', async () => {
+                const pkgBFile1 = `
+package PkgB {
+    public import P1::Part1;
+}
+`;
+                const pkgBFile2 = `
+package PkgB {
+    private import P1::Part1;
+}
+`;
+                const pkgDText = `
+package PkgD {
+    import PkgB::*;
+    part usesPart1 : Part1;
+}
+`;
+                const diags = await getSemanticDiagnosticsForUri(
+                    [
+                        { uri: 'file:///p1.sysml', text: p1Text },
+                        { uri: 'file:///pkg-b-1.sysml', text: pkgBFile1 },
+                        { uri: 'file:///pkg-b-2.sysml', text: pkgBFile2 },
+                        { uri: 'file:///pkg-d.sysml', text: pkgDText },
+                    ],
+                    'file:///pkg-d.sysml',
+                );
+                const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+                expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(false);
+            });
+
+            it('propagates just the same when the public import is in the fragment registered second', async () => {
+                const pkgBFile1 = `
+package PkgB {
+    private import P1::Part1;
+}
+`;
+                const pkgBFile2 = `
+package PkgB {
+    public import P1::Part1;
+}
+`;
+                const pkgDText = `
+package PkgD {
+    import PkgB::*;
+    part usesPart1 : Part1;
+}
+`;
+                const diags = await getSemanticDiagnosticsForUri(
+                    [
+                        { uri: 'file:///p1.sysml', text: p1Text },
+                        { uri: 'file:///pkg-b-1.sysml', text: pkgBFile1 },
+                        { uri: 'file:///pkg-b-2.sysml', text: pkgBFile2 },
+                        { uri: 'file:///pkg-d.sysml', text: pkgDText },
+                    ],
+                    'file:///pkg-d.sysml',
+                );
+                const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+                expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(false);
+            });
+        });
+
         describe('qualified name resolution (§7.5.1/§7.5.5)', () => {
             const pkgAText = `
 package PkgA {
@@ -1468,6 +1714,58 @@ package PkgC {
                 );
                 const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
                 expect(unresolvedDiags.some(d => d.message.includes('PkgA::NoSuchMember'))).toBe(true);
+            });
+
+            it('should NOT resolve a qualified reference through a privately-imported intermediate membership from outside the owning package', async () => {
+                // Regression test: `PkgB::Part3` resolves the "Part3" segment
+                // by indexing into PkgB's own resolved-member table, which
+                // includes Part3 as a *privately* imported membership
+                // (`private import PkgA::Part3;`). §7.5.2: "If [a membership]
+                // is private, then it is not visible" outside the owning
+                // namespace -- that must hold for a qualified-path segment
+                // just as much as for a wildcard-import propagation (already
+                // covered by the "should NOT propagate a privately-imported
+                // name" tests above, which only exercise `import PkgB::*;`,
+                // not a direct `PkgB::Part3` qualified reference).
+                const pkgBText = `
+package PkgB {
+    private import PkgA::Part3;
+}
+`;
+                const pkgDText = `
+package PkgD {
+    part usesPart3 : PkgB::Part3;
+}
+`;
+                const diags = await getSemanticDiagnosticsForUri(
+                    [
+                        { uri: 'file:///pkg-a.sysml', text: pkgAText },
+                        { uri: 'file:///pkg-b.sysml', text: pkgBText },
+                        { uri: 'file:///pkg-d.sysml', text: pkgDText },
+                    ],
+                    'file:///pkg-d.sysml',
+                );
+                const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+                expect(unresolvedDiags.some(d => d.message.includes('PkgB::Part3'))).toBe(true);
+            });
+
+            it('should resolve a qualified reference through a privately-imported intermediate membership from inside the owning package (or a descendant of it)', async () => {
+                // Privacy blocks visibility from *outside* the owning
+                // namespace, not from the namespace itself or anything
+                // nested inside it -- a sibling member of PkgB can still see
+                // PkgB's own private membership via the same qualified path.
+                const pkgBText = `
+package PkgB {
+    private import PkgA::Part3;
+    part usesPart3 : PkgB::Part3;
+}
+`;
+                const diags = await getSemanticDiagnosticsForUri(
+                    [{ uri: 'file:///pkg-a.sysml', text: pkgAText }, { uri: 'file:///pkg-b.sysml', text: pkgBText }],
+                    'file:///pkg-b.sysml',
+                );
+                const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+                expect(unresolvedDiags.some(d => d.message.includes('PkgB::Part3'))).toBe(false);
             });
         });
 
