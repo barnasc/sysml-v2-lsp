@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `unresolved-type` diagnostic, and equivalent `sysml/model` resolution, now respects package/namespace visibility instead of matching any name anywhere in the workspace, so two unrelated packages reusing the same short name no longer mask a genuine unresolved reference.
+
 ## [0.27.0]
 
 ### Fixed
