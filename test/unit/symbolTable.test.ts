@@ -10,6 +10,17 @@ async function buildST(text: string, uri = 'test://test.sysml') {
     return { st, result };
 }
 
+/** Helper: build one symbol table from several documents, each at its own uri. */
+async function buildMultiFileST(fragments: Array<{ text: string; uri: string }>) {
+    const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+    const { SymbolTable } = await import('../../server/src/symbols/symbolTable.js');
+    const st = new SymbolTable();
+    for (const fragment of fragments) {
+        st.build(fragment.uri, parseDocument(fragment.text));
+    }
+    return st;
+}
+
 describe('Symbol Table', () => {
     it('should build a symbol table from a parsed document', async () => {
         const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
@@ -577,6 +588,78 @@ package InheritTest {
         if (view!.viewFilters && view!.viewFilters.length > 0) {
             expect(view!.viewFilters![0]).toContain('PartUsage');
         }
+    });
+});
+
+describe('Package split across files: fields beyond imports/filters also merge', () => {
+    // A reopened package (`package P { ... }` in more than one file) is one
+    // semantic namespace, not several -- a `doc`, prefix `#annotation`, or
+    // view `filter` on one fragment's own package declaration belongs to
+    // that same element, the same way its imports do (see the
+    // "package/namespace visibility" describe block in diagnostics.test.ts).
+    // `getSymbol`/`getAllSymbols` only expose one canonical entry per
+    // qualifiedName, built by `SymbolTable.mergePackageFragments`, so these
+    // fields must be combined there too -- not just come from whichever
+    // fragment happens to be canonical.
+    describe('documentation (order-independence)', () => {
+        const pkgWithoutDocText = `
+package Shared {
+    part def PartA;
+}
+`;
+
+        it('keeps a fragment\'s own documentation when it is registered first', async () => {
+            const pkgWithDocText = `
+package Shared {
+    doc /* Fragment 1's own documentation. */
+    part def PartA;
+}
+`;
+            const st = await buildMultiFileST([
+                { uri: 'test://pkg-1.sysml', text: pkgWithDocText },
+                { uri: 'test://pkg-2.sysml', text: pkgWithoutDocText },
+            ]);
+            const pkg = st.getSymbol('Shared');
+            expect(pkg?.documentation).toContain("Fragment 1's own documentation.");
+        });
+
+        it('keeps a fragment\'s own documentation when it is registered second', async () => {
+            const pkgWithDocText = `
+package Shared {
+    doc /* Fragment 2's own documentation. */
+    part def PartB;
+}
+`;
+            const st = await buildMultiFileST([
+                { uri: 'test://pkg-1.sysml', text: pkgWithoutDocText },
+                { uri: 'test://pkg-2.sysml', text: pkgWithDocText },
+            ]);
+            const pkg = st.getSymbol('Shared');
+            expect(pkg?.documentation).toContain("Fragment 2's own documentation.");
+        });
+    });
+
+    it('combines prefix metadata annotations and view filters declared on different fragments', async () => {
+        const pkg1Text = `
+#Approved
+package Shared {
+    filter @SysML::PartUsage;
+    part def PartA;
+}
+`;
+        const pkg2Text = `
+#Reviewed
+package Shared {
+    part def PartB;
+}
+`;
+        const st = await buildMultiFileST([
+            { uri: 'test://pkg-1.sysml', text: pkg1Text },
+            { uri: 'test://pkg-2.sysml', text: pkg2Text },
+        ]);
+        const pkg = st.getSymbol('Shared');
+        expect(pkg?.metadataAnnotations).toEqual(expect.arrayContaining(['Approved', 'Reviewed']));
+        expect(pkg?.viewFilters && pkg.viewFilters.length > 0).toBe(true);
     });
 });
 

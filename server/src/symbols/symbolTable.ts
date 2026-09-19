@@ -5,7 +5,7 @@ import { ParseResult } from '../parser/parseDocument.js';
 import { contextToRange, tokenToRange } from '../parser/positionUtils.js';
 import { SYSML_KEYWORDS } from '../utils/sysmlKeywords.js';
 import { Scope } from './scope.js';
-import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isUsage as isUsageKind } from './sysmlElements.js';
+import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isDefinition, isUsage as isUsageKind } from './sysmlElements.js';
 
 // ── ruleIndex-based lookup tables ───────────────────────────────────
 // These replace the toLowerCase() + string-comparison chains with O(1)
@@ -532,37 +532,68 @@ export class SymbolTable {
     }
 
     /**
-     * Fold every known fragment's importTargets/filterConditions for `qualifiedName`
-     * onto whichever fragment is currently the canonical `symbols` entry, so an
-     * `import`/`filter` declared in any one file of a multi-file package is visible
-     * regardless of which fragment `symbols.get(qualifiedName)` happens to return.
+     * Recompute the `symbols` entry for `qualifiedName` from every known fragment's
+     * importTargets/filterConditions/metadataAnnotations/viewFilters/documentation,
+     * so anything declared in any one file of a multi-file package is visible
+     * regardless of which fragment happens to be canonical -- a reopened package is
+     * one semantic namespace, so a `doc`, `#annotation`, or view `filter` on one
+     * fragment's own `package P { ... }` declaration belongs to the same element as
+     * another fragment's, not to a competing one that only the "canonical" fragment
+     * gets credit for. Builds a fresh merged *copy* rather than writing the merge
+     * back into one fragment's own symbol object -- mutating a fragment in place
+     * would corrupt its own (otherwise pristine) data, so a later re-merge after
+     * another fragment is edited or removed would keep including data that no
+     * longer exists anywhere (it'd have leaked into whichever fragment got mutated
+     * last, and stayed there even after the fragment that actually declared it was
+     * gone).
      */
     private mergePackageFragments(qualifiedName: string): void {
         const fragments = this.packageFragmentsByQualifiedName.get(qualifiedName);
-        const canonical = this.symbols.get(qualifiedName);
-        if (!fragments || fragments.size === 0 || !canonical) return;
+        if (!fragments || fragments.size === 0) return;
 
         const importTargets: ImportTarget[] = [];
         const filterConditions: FilterExpr[] = [];
+        const metadataAnnotations: string[] = [];
+        const viewFilters: string[] = [];
+        let documentation: string | undefined;
         for (const fragment of fragments.values()) {
             if (fragment.importTargets) importTargets.push(...fragment.importTargets);
             if (fragment.filterConditions) filterConditions.push(...fragment.filterConditions);
+            if (fragment.metadataAnnotations) metadataAnnotations.push(...fragment.metadataAnnotations);
+            if (fragment.viewFilters) viewFilters.push(...fragment.viewFilters);
+            // A package's own `documentation` is a single string field (matching
+            // `extractDocumentation`'s existing "first doc block found" semantics
+            // within one file); across fragments, keep the first one found rather
+            // than concatenating, for the same reason -- just don't let a fragment
+            // with no doc of its own silently blank out one an earlier fragment did have.
+            if (!documentation && fragment.documentation) documentation = fragment.documentation;
         }
-        canonical.importTargets = importTargets.length > 0 ? importTargets : undefined;
-        canonical.filterConditions = filterConditions.length > 0 ? filterConditions : undefined;
+
+        // Identity/location fields (range, uri, ...) come from whichever fragment is
+        // last in the map's insertion order -- matches the previous "most recently
+        // registered fragment is canonical" behavior; re-registering an already-known
+        // uri does not change its position, so an edit doesn't shuffle this.
+        const template = [...fragments.values()].at(-1)!;
+        this.symbols.set(qualifiedName, {
+            ...template,
+            importTargets: importTargets.length > 0 ? importTargets : undefined,
+            filterConditions: filterConditions.length > 0 ? filterConditions : undefined,
+            metadataAnnotations: metadataAnnotations.length > 0 ? metadataAnnotations : undefined,
+            viewFilters: viewFilters.length > 0 ? viewFilters : undefined,
+            documentation,
+        });
     }
 
     /**
-     * Drop `uri`'s own fragment of package `qualifiedName` (on document edit/close).
-     * If other fragments remain, re-point the canonical `symbols` entry at one of
-     * them and re-merge; otherwise drop the package entirely, matching the plain
-     * (non-package) symbol removal this replaces for package-kind symbols.
+     * Drop `uri`'s own fragment of package `qualifiedName` (on document edit/close)
+     * and recompute the merged `symbols` entry from whatever fragments remain;
+     * if none remain, drop the package entirely, matching the plain (non-package)
+     * symbol removal this replaces for package-kind symbols.
      */
     private unregisterPackageFragment(qualifiedName: string, uri: string): void {
         const fragments = this.packageFragmentsByQualifiedName.get(qualifiedName);
         fragments?.delete(uri);
         if (fragments && fragments.size > 0) {
-            this.symbols.set(qualifiedName, fragments.values().next().value!);
             this.mergePackageFragments(qualifiedName);
         } else {
             this.packageFragmentsByQualifiedName.delete(qualifiedName);
@@ -783,7 +814,12 @@ export class SymbolTable {
         const viewFilters = (isView || isPackage) ? this.extractViewFilters(ctx) : undefined;
         const viewRendering = isView ? this.extractViewRendering(ctx) : undefined;
         const controlFlows = isAction ? this.extractControlFlows(ctx) : undefined;
-        const importTargets = isPackage ? this.extractImportTargets(ctx) : undefined;
+        // §7.5.1: definitions and usages are namespaces too, so their own
+        // body can contain `import` statements, not just a package's --
+        // `filter` (§7.5.4), by contrast, is grammar-restricted to package
+        // bodies only (`elementFilterMember` is a `packageBodyElement`
+        // alternative, with no equivalent in `definitionBodyItem`).
+        const importTargets = (isPackage || isDefinition(kind) || isUsageKind(kind)) ? this.extractImportTargets(ctx) : undefined;
         const filterConditions = isPackage ? this.extractPackageFilterConditions(ctx) : undefined;
 
         return {
@@ -1474,24 +1510,42 @@ export class SymbolTable {
     }
 
     /**
-     * Extract `import` statements owned directly by a package's body.
-     * Imports are direct children of packageBody (not nested arbitrarily,
-     * unlike expose in view bodies), so only that one level is scanned.
+     * Extract `import` statements owned directly by a namespace's body --
+     * a package's `packageBody`, or a definition/usage's `definitionBody`
+     * (usages reuse the same rule via `usageBody: definitionBody;`). Per
+     * §7.5.1, "all kinds of SysML definitions and usages are also
+     * namespaces... all rules discussed generically for namespaces...
+     * apply generically to packages, definitions and usages" -- an
+     * `import` inside e.g. `part def Vehicle { import Lib::Engine; ... }`
+     * is a real import of that definition's own namespace, not a no-op.
+     * Only the direct body of `ctx` itself is scanned (imports are not
+     * nested arbitrarily, unlike expose in view bodies), never a nested
+     * feature's own body -- `packageBody`/`definitionBody` are reached
+     * from `ctx` via a fixed, shallow chain (`definition`/`usage` wrapper
+     * rules only), so the first body-rule match found is always `ctx`'s
+     * own, never a descendant feature's.
      */
     private extractImportTargets(ctx: ParserRuleContext): ImportTarget[] {
+        const packageBody = this.findRule(ctx, SysMLv2Parser.RULE_packageBody);
+        if (packageBody) return this.extractImportsFromBody(packageBody, SysMLv2Parser.RULE_packageBodyElement);
+
+        const definitionBody = this.findRule(ctx, SysMLv2Parser.RULE_definitionBody);
+        if (definitionBody) return this.extractImportsFromBody(definitionBody, SysMLv2Parser.RULE_definitionBodyItem);
+
+        return [];
+    }
+
+    /** Scan a body rule's direct `bodyItem`-kind children for an `importRule`, per `extractImportTargets`. */
+    private extractImportsFromBody(body: ParserRuleContext, bodyItemRuleIndex: number): ImportTarget[] {
         const results: ImportTarget[] = [];
-        for (let i = 0; i < ctx.getChildCount(); i++) {
-            const child = ctx.getChild(i);
-            if (!(child instanceof ParserRuleContext) || child.ruleIndex !== SysMLv2Parser.RULE_packageBody) continue;
-            for (let j = 0; j < child.getChildCount(); j++) {
-                const bodyItem = child.getChild(j);
-                if (!(bodyItem instanceof ParserRuleContext) || bodyItem.ruleIndex !== SysMLv2Parser.RULE_packageBodyElement) continue;
-                for (let k = 0; k < bodyItem.getChildCount(); k++) {
-                    const maybeImportRule = bodyItem.getChild(k);
-                    if (maybeImportRule instanceof ParserRuleContext && maybeImportRule.ruleIndex === SysMLv2Parser.RULE_importRule) {
-                        const parsed = this.parseImportRule(maybeImportRule);
-                        if (parsed) results.push(parsed);
-                    }
+        for (let j = 0; j < body.getChildCount(); j++) {
+            const bodyItem = body.getChild(j);
+            if (!(bodyItem instanceof ParserRuleContext) || bodyItem.ruleIndex !== bodyItemRuleIndex) continue;
+            for (let k = 0; k < bodyItem.getChildCount(); k++) {
+                const maybeImportRule = bodyItem.getChild(k);
+                if (maybeImportRule instanceof ParserRuleContext && maybeImportRule.ruleIndex === SysMLv2Parser.RULE_importRule) {
+                    const parsed = this.parseImportRule(maybeImportRule);
+                    if (parsed) results.push(parsed);
                 }
             }
         }

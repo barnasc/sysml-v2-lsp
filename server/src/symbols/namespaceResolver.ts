@@ -12,7 +12,7 @@
  * construction time).
  */
 
-import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isDefinition } from './sysmlElements.js';
+import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isDefinition, isUsage } from './sysmlElements.js';
 
 export interface SymbolIndexes {
     byName: Map<string, SysMLSymbol[]>;
@@ -166,13 +166,81 @@ export class NamespaceResolver {
             const ownerQualifiedName: string = resolvedQualifiedName;
             const members: ResolvedMember[] | undefined = this.getResolvedMembers(ownerQualifiedName, indexes).get(segment);
             const visibleMember: ResolvedMember | undefined = members?.find(
-                (m: ResolvedMember) => m.visibility === 'public' || isWithinStart(ownerQualifiedName),
+                (m: ResolvedMember) => m.visibility === 'public'
+                    || isWithinStart(ownerQualifiedName)
+                    || (m.visibility === 'protected' && this.isProtectedVisibleFrom(startQualifiedName, ownerQualifiedName, indexes)),
             );
             if (!visibleMember) return undefined;
             resolvedQualifiedName = visibleMember.symbol.qualifiedName;
         }
         const finalQualifiedName: string = resolvedQualifiedName;
         return indexes.byQualifiedName.get(finalQualifiedName);
+    }
+
+    /**
+     * §7.5.3's protected-import exception: "A visibility of protected is the
+     * same as private, unless the importing namespace is a definition or
+     * usage, in which case the imported memberships are also visible in all
+     * specializations of the definition or usage (see also 7.6 on
+     * inheritance)." `ownerQualifiedName` is the namespace that owns the
+     * protected membership (where the `protected import` was declared);
+     * this is true when `ownerQualifiedName` is itself a definition or
+     * usage, and `startQualifiedName` (or one of its own enclosing
+     * namespaces) is a specialization of it.
+     *
+     * Only covers a *qualified* reference reaching into a specialization's
+     * own protected members this way (`resolveQualifiedNameFrom`'s
+     * multi-segment loop) -- an *unqualified* reference to a member a
+     * specialization inherits without qualifying it by the supertype's name
+     * is a broader §7.6 feature-inheritance question this resolver doesn't
+     * otherwise model (it deliberately covers only §7.5's own namespace/
+     * import mechanics), so that case isn't covered here.
+     */
+    private isProtectedVisibleFrom(startQualifiedName: string | undefined, ownerQualifiedName: string, indexes: SymbolIndexes): boolean {
+        const owner = indexes.byQualifiedName.get(ownerQualifiedName);
+        if (!owner || !(isDefinition(owner.kind) || isUsage(owner.kind))) return false;
+
+        for (const ancestorQualifiedName of this.namespaceAncestorsOf(startQualifiedName, indexes)) {
+            if (ancestorQualifiedName && this.isSpecializationOf(ancestorQualifiedName, ownerQualifiedName, indexes)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Whether `candidateQualifiedName`'s own definition/usage transitively
+     * specializes `ownerQualifiedName` (`:>`/`specializes`/`subsets` for a
+     * definition, or the typing relationship for a usage) per §7.6. Used
+     * only by `isProtectedVisibleFrom`. Walks `typeNames`, resolving each
+     * name via `resolveQualifiedNameFrom` relative to the candidate's own
+     * enclosing scope -- the same namespace-aware resolution an ordinary
+     * `:>` reference itself goes through -- rather than a bare simple-name
+     * lookup across the whole workspace (`indexes.definitionsByName.get`):
+     * that would match *any* same-named definition anywhere, not just the
+     * one `candidateQualifiedName`'s own `:>` clause actually refers to, so
+     * an unrelated definition in a different package sharing a supertype's
+     * simple name could falsely satisfy this check.
+     */
+    private isSpecializationOf(candidateQualifiedName: string, ownerQualifiedName: string, indexes: SymbolIndexes): boolean {
+        const visited = new Set<string>([candidateQualifiedName]);
+        let frontier = [candidateQualifiedName];
+        let guard = 0;
+        while (frontier.length > 0 && guard++ < 64) {
+            const next: string[] = [];
+            for (const qualifiedName of frontier) {
+                const symbol = indexes.byQualifiedName.get(qualifiedName);
+                for (const typeName of symbol?.typeNames ?? []) {
+                    const supertype = this.resolveQualifiedNameFrom(symbol?.parentQualifiedName, typeName, indexes);
+                    if (!supertype) continue;
+                    if (supertype.qualifiedName === ownerQualifiedName) return true;
+                    if (!visited.has(supertype.qualifiedName)) {
+                        visited.add(supertype.qualifiedName);
+                        next.push(supertype.qualifiedName);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        return false;
     }
 
     /**
@@ -184,15 +252,27 @@ export class NamespaceResolver {
         return this.namespaceAncestorsOf(symbol.parentQualifiedName, indexes);
     }
 
-    /** As `namespaceAncestors`, but starting from a qualifiedName directly rather than a symbol's own parent. */
+    /**
+     * As `namespaceAncestors`, but starting from a qualifiedName directly rather
+     * than a symbol's own parent. Iteration order matters here, not just
+     * membership: `resolveQualifiedNameFrom`'s first-segment lookup walks this
+     * set in order and stops at the first namespace that has a matching member,
+     * so a `Set`'s insertion order *is* the search order. Per §7.5.1, name
+     * resolution searches the innermost enclosing namespace outward, with the
+     * implicit root namespace as the last (least specific) fallback -- a local
+     * name must shadow a same-named root-level one, not the reverse. `''` (the
+     * root) is therefore added last, after the full innermost-to-outermost
+     * climb, not seeded first.
+     */
     private namespaceAncestorsOf(startQualifiedName: string | undefined, indexes: SymbolIndexes): Set<string> {
-        const ancestors = new Set<string>(['']);
+        const ancestors = new Set<string>();
         let current = startQualifiedName;
         let guard = 0;
         while (current && guard++ < 64) {
             ancestors.add(current);
             current = indexes.byQualifiedName.get(current)?.parentQualifiedName;
         }
+        ancestors.add('');
         return ancestors;
     }
 
@@ -213,11 +293,6 @@ export class NamespaceResolver {
         }
         const cached = perIndexesCache.get(qualifiedName);
         if (cached) return cached;
-
-        // Cycle guard: seed with an empty table before recursing, so an import
-        // cycle sees "nothing yet" for the in-progress namespace instead of
-        // recursing forever. The real (non-empty) result overwrites it below.
-        perIndexesCache.set(qualifiedName, new Map());
 
         const members = new Map<string, ResolvedMember[]>();
         // If the same element reaches this namespace through more than one membership
@@ -244,6 +319,22 @@ export class NamespaceResolver {
             addMember(owned.name, { symbol: owned, visibility: owned.visibility ?? 'public' });
         }
 
+        // Cycle guard: seed the cache with the owned members computed so far (a
+        // copy, since `members` keeps mutating below) before processing imports,
+        // rather than an empty table. An import target is itself resolved
+        // relative to *this* namespace (see `applyImport`'s `fromQualifiedName`),
+        // which means resolving it can recurse back into this same
+        // `getResolvedMembers` call for a directly-owned sibling (e.g. `public
+        // import Inner::X;` where `Inner` is a package declared directly in this
+        // same namespace) -- that recursive call must see the already-known
+        // owned members, not nothing, or a same-namespace relative import would
+        // never resolve. An empty seed was only ever needed to stop a genuine
+        // import *cycle* (this namespace transitively importing itself) from
+        // recursing forever; owned members are computed with no recursion at
+        // all, so exposing them here doesn't reopen that. The real (owned +
+        // imported) result overwrites this below once imports are processed.
+        perIndexesCache.set(qualifiedName, new Map(members));
+
         const owner = indexes.byQualifiedName.get(qualifiedName);
         const importTargets = owner?.importTargets ?? [];
         // §7.5.4: a package-level `filter` applies to every import of that package,
@@ -256,7 +347,7 @@ export class NamespaceResolver {
                     if (evaluateFilter(effectiveFilter, entry.symbol)) addMember(name, entry);
                 }
                 : addMember;
-            this.applyImport(imp, owner?.parentQualifiedName, indexes, filteredAddMember);
+            this.applyImport(imp, qualifiedName, indexes, filteredAddMember);
         }
 
         perIndexesCache.set(qualifiedName, members);
@@ -269,14 +360,20 @@ export class NamespaceResolver {
      * ImportTarget (§7.5.3, including the P4/P5/P6 recursive-import example).
      *
      * `imp.target` is resolved relative to `fromQualifiedName` (the importing
-     * namespace's own enclosing scope), not as an absolute/global name: a bare
-     * `import C;` inside a nested package must be able to pick up a `C` that
-     * package's own enclosing package already imported (§7.5.1), the same way
-     * an ordinary type reference there would.
+     * namespace itself, per §7.5.1's generic name-resolution rule: begin in the
+     * namespace containing the reference, then walk outward through its
+     * enclosing namespaces), not as an absolute/global name. This covers both:
+     * a target directly owned by the importing namespace itself (e.g. `public
+     * import Inner::X;` where `Inner` is a package declared directly in this
+     * same namespace), and a bare `import C;` inside a nested package that
+     * picks up a `C` only visible via an enclosing package's own import
+     * (§7.5.3's P2/Q example) -- the latter falls through to an outer ancestor
+     * once this namespace's own (owned-only, see the cycle-guard note in
+     * `getResolvedMembers`) members come up empty for that name.
      */
     private applyImport(
         imp: ImportTarget,
-        fromQualifiedName: string | undefined,
+        fromQualifiedName: string,
         indexes: SymbolIndexes,
         addMember: (name: string, entry: ResolvedMember) => void,
     ): void {

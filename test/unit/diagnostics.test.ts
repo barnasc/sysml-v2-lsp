@@ -109,6 +109,84 @@ package CircularReferenceExample {
         });
     });
 
+    describe('import inside definition/usage body (§7.5.1: definitions and usages are namespaces too)', () => {
+        it('should resolve a reference via an import declared inside a definition body', async () => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    part def Vehicle {
+        import Lib::Engine;
+        part engine : Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Engine'"))).toBe(false);
+        });
+
+        it('should resolve a reference via an import declared inside a usage body', async () => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    part def Vehicle;
+    part vehicle : Vehicle {
+        import Lib::Engine;
+        part engine : Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Engine'"))).toBe(false);
+        });
+
+        it('should still flag an unresolved reference when no enclosing definition/usage/package imports it', async () => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    part def Vehicle {
+        part engine : Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Engine'"))).toBe(true);
+        });
+
+        it('should not leak a definition-body import outside that definition', async () => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    part def Vehicle {
+        import Lib::Engine;
+        part engine : Engine;
+    }
+    part def Unrelated {
+        part alsoEngine : Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => (d.data as { elementName?: string } | undefined)?.elementName === 'engine')).toBe(false);
+            expect(unresolvedDiags.some(d => (d.data as { elementName?: string } | undefined)?.elementName === 'alsoEngine')).toBe(true);
+        });
+    });
+
     describe('unresolved type references', () => {
         it('should flag a type that does not exist in the document', async () => {
             const text = `
@@ -1247,6 +1325,49 @@ package PkgB {
             expect(unresolvedDiags.some(d => d.message.includes("'Part3'"))).toBe(true);
         });
 
+        it('should detect if a fragment\'s import is edited or removed', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SemanticValidator } = await import('../../server/src/providers/semanticValidator.js');
+
+            const uriA = 'file:///pkg-a.sysml';
+            const uriB1 = 'file:///pkg-b-1.sysml';
+            const uriB2 = 'file:///pkg-b-2.sysml';
+            const pkgB1WithImport = `
+package PkgB {
+    import PkgA::Part3;
+    part def Part1;
+}
+`;
+            const pkgB2 = `
+package PkgB {
+    part usesPart3 : Part3;
+}
+`;
+
+            const docManager = new DocumentManager();
+            docManager.parse(await makeDoc(pkgAText, uriA));
+            docManager.parse(await makeDoc(pkgB1WithImport, uriB1));
+            docManager.parse(await makeDoc(pkgB2, uriB2));
+
+            const validator = new SemanticValidator(docManager);
+            const beforeDiags = validator.validate(uriB2).filter(d => d.code === 'unresolved-type');
+            expect(beforeDiags.some(d => d.message.includes("'Part3'"))).toBe(false);
+
+            // Incremental test: Edit existing fragment 1 (uriB1), same uri, new version, import removed
+            // fragment 2 (pkgB2) is untouched, so its own symbol never held the
+            // import in the first place; only the merge result should change.
+            const mod = await import('../../server/node_modules/vscode-languageserver-textdocument/lib/esm/main.js');
+            const pkgB1WithoutImport = `
+package PkgB {
+    part def Part1;
+}
+`;
+            docManager.parse(mod.TextDocument.create(uriB1, 'sysml', 2, pkgB1WithoutImport));
+
+            const afterDiags = validator.validate(uriB2).filter(d => d.code === 'unresolved-type');
+            expect(afterDiags.some(d => d.message.includes("'Part3'"))).toBe(true);
+        });
+
         it('should resolve for non-part definition kinds too (attribute def, port def, interface def)', async () => {
             const libText = `
 package Lib {
@@ -1454,6 +1575,62 @@ package P2 {
             expect(unresolvedDiags.some(d => d.message.includes("'Part1'"))).toBe(false);
         });
 
+        it('should resolve an import target directly owned by the importing namespace itself, and let an external package consume its public re-export', async () => {
+            const outerText = `
+package Outer {
+    package Inner {
+        part def X;
+    }
+    public import Inner::X;
+}
+`;
+            const externalText = `
+package External {
+    import Outer::X;
+    part usesX : X;
+}
+`;
+            const diags = await getSemanticDiagnosticsForUri(
+                [
+                    { uri: 'file:///outer.sysml', text: outerText },
+                    { uri: 'file:///external.sysml', text: externalText },
+                ],
+                'file:///external.sysml',
+            );
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'X'"))).toBe(false);
+        });
+
+        it('should let a local package shadow a same-named root-level package, not the reverse (§7.5.1: search innermost outward, root last)', async () => {
+            const text = `
+package PkgA {
+    part def Part1Base;
+}
+
+package PkgB {
+    package PkgA {
+        part def Part1Local;
+    }
+    part usesLocal : PkgA::Part1Local;
+    part usesBaseFromPkgB : PkgA::Part1Base;
+}
+
+package PkgC {
+    part usesBaseFromPkgC : PkgA::Part1Base;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            const elementNames = (name: string) =>
+                unresolvedDiags.some(d => (d.data as { elementName?: string } | undefined)?.elementName === name);
+            // The local PkgA::Part1Local reference must resolve against the nested PkgA.
+            expect(elementNames('usesLocal')).toBe(false);
+            // PkgA::Part1Base is shadowed from within PkgB -- the local PkgA has no such member.
+            expect(elementNames('usesBaseFromPkgB')).toBe(true);
+            // An unrelated package PkgC is unaffected -- root PkgA::Part1Base resolves normally there.
+            expect(elementNames('usesBaseFromPkgC')).toBe(false);
+        });
+
         it('should follow recursive membership import into nested packages (standard §7.5.3 P4/P5 example)', async () => {
             // package P4 { item A; item B; package Q { item C; } }
             // package P5 { private import P4::**; } -- equivalent to
@@ -1598,6 +1775,63 @@ package PkgD {
             );
             const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
             expect(unresolvedDiags.some(d => d.message.includes("'Part3'"))).toBe(true);
+        });
+
+        it('should let a specialization of a definition/usage see its protected-imported members (§7.5.3 exception; unrelated definitions still cannot)', async () => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    part def Vehicle {
+        protected import Lib::Engine;
+    }
+    part def SportsCar :> Vehicle {
+        part engineViaSpecialization : Vehicle::Engine;
+    }
+    part def Unrelated {
+        part engineViaUnrelated : Vehicle::Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            const elementNames = (name: string) =>
+                unresolvedDiags.some(d => (d.data as { elementName?: string } | undefined)?.elementName === name);
+            // SportsCar specializes Vehicle, so it inherits visibility into Vehicle's protected import.
+            expect(elementNames('engineViaSpecialization')).toBe(false);
+            // Unrelated is not a specialization of Vehicle -- protected behaves as private for it.
+            expect(elementNames('engineViaUnrelated')).toBe(true);
+        });
+
+        it('should NOT let an unrelated same-named definition in another package falsely satisfy the specialization check (§7.6)', async () => {
+            // Regression test: `isSpecializationOf` must resolve `SportsCar`'s
+            // `:>` target the same namespace-aware way any other reference
+            // would, not by matching *any* definition sharing the simple name
+            // "Vehicle" anywhere in the workspace. PkgB::SportsCar specializes
+            // PkgB::Vehicle -- an unrelated PkgA::Vehicle that merely happens
+            // to share that name must not count, even though PkgA::Vehicle
+            // does have a protected import of Engine.
+            const text = `
+package Lib {
+    part def Engine;
+}
+package PkgA {
+    part def Vehicle {
+        protected import Lib::Engine;
+    }
+}
+package PkgB {
+    part def Vehicle;
+    part def SportsCar :> Vehicle {
+        part engine : PkgA::Vehicle::Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes('PkgA::Vehicle::Engine'))).toBe(true);
         });
 
         describe('mixed-visibility duplicate imports of the same target (order-independence)', () => {
@@ -1866,3 +2100,4 @@ package User {
         });
     });
 });
+
