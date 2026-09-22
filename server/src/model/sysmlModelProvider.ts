@@ -12,7 +12,7 @@ import { analyseComplexity } from '../analysis/complexityAnalyzer.js';
 import { DocumentManager } from '../documentManager.js';
 import { getLibraryPackageNames } from '../library/libraryIndex.js';
 import { ParseResult } from '../parser/parseDocument.js';
-import { NamespaceResolver, buildSymbolIndexes, findConflictedQualifiedNames } from '../symbols/namespaceResolver.js';
+import { NamespaceResolver, buildSymbolIndexes, findConflictedQualifiedNames, type SymbolIndexes } from '../symbols/namespaceResolver.js';
 import { SymbolTable } from '../symbols/symbolTable.js';
 import {
     SysMLElementKind,
@@ -202,7 +202,32 @@ export class SysMLModelProvider {
     /** Cached library package names — never changes after init. */
     private libraryNamesCache?: Set<string>;
 
+    /**
+     * Cached workspace-wide symbol indexes/conflict map, invalidated when `getWorkspaceSymbolTable().getAllSymbols()`'s
+     * own array identity changes (same technique as `SemanticValidator.getOrBuildIndexes`).
+     * `extractSemanticDiagnostics` is called once per file during a full workspace scan (a client
+     * background-indexing every workspace file this way) -- without this, an N-file workspace
+     * redundantly rebuilt this same O(workspace-size) structure N times in a row for no reason,
+     * since nothing mutates the symbol table between those calls.
+     */
+    private workspaceDiagnosticsContextCache?: {
+        symbols: SysMLSymbol[];
+        indexes: SymbolIndexes;
+        conflicts: Map<string, SysMLSymbol[]>;
+    };
+
     constructor(private readonly documentManager: DocumentManager) { }
+
+    /** (Re)builds, or reuses the cached, workspace-wide indexes/conflict map `extractSemanticDiagnostics` needs. */
+    private getOrBuildWorkspaceDiagnosticsContext(allSymbols: SysMLSymbol[]): { indexes: SymbolIndexes; conflicts: Map<string, SysMLSymbol[]> } {
+        if (this.workspaceDiagnosticsContextCache && this.workspaceDiagnosticsContextCache.symbols === allSymbols) {
+            return this.workspaceDiagnosticsContextCache;
+        }
+        const indexes = buildSymbolIndexes(allSymbols);
+        const conflicts = findConflictedQualifiedNames(allSymbols);
+        this.workspaceDiagnosticsContextCache = { symbols: allSymbols, indexes, conflicts };
+        return this.workspaceDiagnosticsContextCache;
+    }
 
     /** Remove cached symbol table for a URI (e.g. on document close). */
     removeUri(uri: string): void {
@@ -210,12 +235,17 @@ export class SysMLModelProvider {
     }
 
     /**
-     * Drop **all** cached symbol tables.
+     * Drop **all** cached symbol tables, plus the workspace-wide diagnostics-context cache
+     * (`getOrBuildWorkspaceDiagnosticsContext`) -- the latter is unaffected by `removeUri` (only a
+     * document-scoped cache) since it's keyed by array identity, not by uri, and always rebuilds
+     * once the identity it was keyed on goes stale anyway; this is only a manual escape hatch for
+     * a client (`sysml/clearCache`) that wants a hard reset without needing that to happen first.
      * Returns the number of entries that were evicted.
      */
     clearAll(): number {
         const count = this._stCache.size;
         this._stCache.clear();
+        this.workspaceDiagnosticsContextCache = undefined;
         return count;
     }
 
@@ -1209,27 +1239,26 @@ export class SysMLModelProvider {
         const symbols = symbolTable.getSymbolsForUri(uri);
         const diagnostics: SemanticDiagnosticDTO[] = [];
 
-        // Unresolved-type resolution needs the *workspace* symbol table, not just
-        // this document's own -- a type can be legitimately declared in, or
-        // imported from, another file (see NamespaceResolver's own doc comment
-        // for why this is shared with SemanticValidator rather than duplicated).
-        const workspaceIndexes = buildSymbolIndexes(this.documentManager.getWorkspaceSymbolTable().getAllSymbols());
+        // Unresolved-type resolution needs the *workspace* symbol table, not just this
+        // document's own -- a type can be legitimately declared in, or imported from, another
+        // file (see NamespaceResolver's own doc comment for why this is shared with
+        // SemanticValidator rather than duplicated). Ambiguous namespace names (two symbols of
+        // the *same* kind sharing a qualifiedName, e.g. two `part def A` -- see
+        // `findConflictedQualifiedNames`'s doc comment for why a package and an unrelated
+        // definition sharing a name is NOT one of these) also need the workspace symbol table:
+        // the conflict, and the resulting unresolved references it causes, can span two files.
+        // Both are cached per workspace-symbol-table snapshot (see
+        // `getOrBuildWorkspaceDiagnosticsContext`'s own doc comment) since this method runs once
+        // per file during a full workspace scan. Ported from
+        // `SemanticValidator.checkAmbiguousNamespaceName` so the `sysml/model` request's own
+        // diagnostics (Model Explorer, Dashboard, Feature Inspector) explain *why* a reference is
+        // unresolved the same way the editor's own diagnostics do, not just leave it unexplained.
+        const allSymbols = this.documentManager.getWorkspaceSymbolTable().getAllSymbols();
+        const { indexes: workspaceIndexes, conflicts } = this.getOrBuildWorkspaceDiagnosticsContext(allSymbols);
         if (!this.libraryNamesCache) {
             this.libraryNamesCache = new Set(getLibraryPackageNames());
         }
         const libraryNames = this.libraryNamesCache;
-
-        // Ambiguous namespace names (two symbols of the *same* kind sharing a
-        // qualifiedName, e.g. two `part def A` -- see
-        // `findConflictedQualifiedNames`'s doc comment for why a package and
-        // an unrelated definition sharing a name is NOT one of these) also
-        // need the workspace symbol table: the conflict, and the resulting
-        // unresolved references it causes, can span two files. Ported from
-        // `SemanticValidator.checkAmbiguousNamespaceName` so the `sysml/model`
-        // request's own diagnostics (Model Explorer, Dashboard, Feature
-        // Inspector) explain *why* a reference is unresolved the same way the
-        // editor's own diagnostics do, not just leave it unexplained.
-        const conflicts = findConflictedQualifiedNames(this.documentManager.getWorkspaceSymbolTable().getAllSymbols());
 
         for (const symbol of symbols) {
             const conflicting = conflicts.get(symbol.qualifiedName);

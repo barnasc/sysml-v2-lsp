@@ -1148,6 +1148,88 @@ package Test {
                 expect(['error', 'warning', 'info']).toContain(diag.severity);
             }
         });
+
+        // Regression test for `getOrBuildWorkspaceDiagnosticsContext`'s own cache
+        // (`SysMLModelProvider`'s doc comment): a workspace-wide index/conflict-map cache keyed by
+        // `getWorkspaceSymbolTable().getAllSymbols()`'s array identity, added because a client
+        // requesting the `diagnostics` scope once per file during a full workspace scan otherwise
+        // rebuilt this same O(workspace-size) structure once per file for no reason. This reuses
+        // one `SysMLModelProvider` instance across two `getModel`
+        // calls (unlike `getModelForDocuments`, which makes a fresh provider every time and so
+        // could never observe stale cached state) to prove the cache actually invalidates once the
+        // underlying symbol table changes, rather than serving a stale answer from the first call.
+        it('does not serve a stale ambiguous-namespace-name diagnostic from its workspace-index cache after a sibling document is re-parsed', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+
+            const uriA = 'file:///cache-a.sysml';
+            const uriB = 'file:///cache-b.sysml';
+            const aText = 'part def Wheel {}\n';
+            const bTextConflicting = 'part def Wheel {}\n';
+            const bTextRenamed = 'part def Wheel2 {}\n';
+
+            const docManager = new DocumentManager();
+            docManager.parse(TextDocument.create(uriA, 'sysml', 1, aText));
+            docManager.parse(TextDocument.create(uriB, 'sysml', 1, bTextConflicting));
+            const provider = new SysMLModelProvider(docManager);
+
+            const before = await provider.getModel(uriA, 1, ['diagnostics']);
+            expect(before.diagnostics!.some(d => d.code === 'ambiguous-namespace-name')).toBe(true);
+
+            docManager.parse(TextDocument.create(uriB, 'sysml', 2, bTextRenamed));
+
+            const after = await provider.getModel(uriA, 1, ['diagnostics']);
+            expect(after.diagnostics!.some(d => d.code === 'ambiguous-namespace-name')).toBe(false);
+        });
+
+        it('picks up a newly-added document introducing a conflict, not the cached pre-addition answer', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+
+            const uriA = 'file:///cache-add-a.sysml';
+            const uriB = 'file:///cache-add-b.sysml';
+            const aText = 'part def Wheel {}\n';
+
+            const docManager = new DocumentManager();
+            docManager.parse(TextDocument.create(uriA, 'sysml', 1, aText));
+            const provider = new SysMLModelProvider(docManager);
+
+            const before = await provider.getModel(uriA, 1, ['diagnostics']);
+            expect(before.diagnostics!.some(d => d.code === 'ambiguous-namespace-name')).toBe(false);
+
+            // uriB never existed before this point -- a brand-new document entering the workspace,
+            // not an edit to one the cache already knew about.
+            docManager.parse(TextDocument.create(uriB, 'sysml', 1, 'part def Wheel {}\n'));
+
+            const after = await provider.getModel(uriA, 1, ['diagnostics']);
+            expect(after.diagnostics!.some(d => d.code === 'ambiguous-namespace-name')).toBe(true);
+        });
+
+        it('stops flagging a conflict once the conflicting document is removed from the workspace', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+
+            const uriA = 'file:///cache-remove-a.sysml';
+            const uriB = 'file:///cache-remove-b.sysml';
+            const aText = 'part def Wheel {}\n';
+            const bText = 'part def Wheel {}\n';
+
+            const docManager = new DocumentManager();
+            docManager.parse(TextDocument.create(uriA, 'sysml', 1, aText));
+            docManager.parse(TextDocument.create(uriB, 'sysml', 1, bText));
+            const provider = new SysMLModelProvider(docManager);
+
+            const before = await provider.getModel(uriA, 1, ['diagnostics']);
+            expect(before.diagnostics!.some(d => d.code === 'ambiguous-namespace-name')).toBe(true);
+
+            docManager.remove(uriB);
+
+            const after = await provider.getModel(uriA, 1, ['diagnostics']);
+            expect(after.diagnostics!.some(d => d.code === 'ambiguous-namespace-name')).toBe(false);
+        });
     });
 
     // -------------------------------------------------------------------

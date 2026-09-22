@@ -13,6 +13,10 @@
 - Improved robustness of namespace resolution against stack overflows, guarding against recursive/mutually re-exported package import cycles and protected-member visibility checks through a self-referential specialization chain.
 - A nested package's own imports are no longer attributed to its enclosing definition, replacing the definition's own imports; import extraction is now restricted to the owning namespace's body.
 
+### Changed
+
+- performance improvement: `sysml/model`'s `diagnostics` scope now caches its workspace-wide symbol indexes map per workspace-symbol-table snapshot, instead of rebuilding them from scratch on every request; the cache updates automatically on any uri change, addition, or deletion.
+
 ## [0.27.0]
 
 ### Fixed
