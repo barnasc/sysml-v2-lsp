@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.28.0]
+
 ### Added
 
 - Custom LSP request `sysml/elementLookup` for batched, exact-match element lookup by declared name, short-name alias, or qualified name, with optional namespace scoping and an `indexingComplete` flag.
