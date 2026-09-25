@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.29.0]
+
 ### Added
 
 - `sysml.validation.disabledCodes` filters published diagnostics by code and revalidates open documents when settings change (daltskin/VSCode_SysML_Extension#97).
