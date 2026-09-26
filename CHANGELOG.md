@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.30.0]
+
 ### Fixed
 
 - Update the generated parser and DFA snapshot from `sysml-v2-grammar` commit `062b459` (OMG 2026-08), correcting expression precedence, right-associative exponentiation, conditional operands, and primary-expression boundaries.
