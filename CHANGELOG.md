@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.31.0]
+
 ### Changed
 
 - Improve the `ambiguous-namespace-name` diagnostic to identify the conflicting document and number of occurrences.
