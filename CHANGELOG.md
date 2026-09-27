@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improve the `ambiguous-namespace-name` diagnostic to identify the conflicting document and number of occurrences.
+
 ### Fixed
 
 - Upgrade the generated parser and DFA snapshot to `sysml-v2-grammar` v2026.08.1 and migrate bundled examples to the release's required explicit import visibility.
