@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed false positive on `ambiguous-namespace-name` diagnosis: match a Windows document's URI spellings (`file:///c%3A/...` and `file:///C:/...`) as one document, so a document no longer reports each of its declarations as an conflict with itself.
+- Revalidate other open documents when a document is closed, so an `ambiguous-namespace-name` conflict it caused (e.g. after deleting it or dropping an unsaved edit) no longer stays visible.
+
 ## [0.31.0]
 
 ### Changed
