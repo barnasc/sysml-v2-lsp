@@ -835,3 +835,67 @@ package P {
         expect(toMetaclassName(SysMLElementKind.DecisionNode)).toBe('DecisionNode');
     });
 });
+
+describe('imports inside non-definitionBody bodies (§8.2.2: every definition/usage body may own an Import)', () => {
+    const lib = 'package Lib { part def Engine; part def Wheel; }';
+
+    it.each([
+        ['interface def', 'interfaceBody'],
+        ['interface', 'interfaceBody'],
+        ['action def', 'actionBody'],
+        ['action', 'actionBody'],
+        ['state def', 'stateDefBody'],
+        ['state', 'stateUsageBody'],
+        ['calc def', 'calculationBody'],
+        ['constraint def', 'calculationBody'],
+        ['constraint', 'calculationBody'],
+        ['requirement def', 'requirementBody'],
+        ['requirement', 'requirementBody'],
+        ['use case def', 'caseBody'],
+        ['use case', 'caseBody'],
+        ['analysis def', 'caseBody'],
+        ['verification def', 'caseBody'],
+        ['view def', 'viewDefinitionBody'],
+        ['view', 'viewBody'],
+    ])('records a private import in a %s (%s)', async (keyword) => {
+        const { st, result } = await buildST(`${lib}\npackage User {\n    ${keyword} T { private import Lib::Engine; }\n}`);
+        expect(result.errors).toEqual([]);
+        expect(st.getSymbol('User::T')?.importTargets).toEqual([
+            { kind: 'membership', target: 'Lib::Engine', visibility: 'private' },
+        ]);
+    });
+
+    it('records an import that follows behavior members in an action body', async () => {
+        const { st } = await buildST(`${lib}
+package User {
+    action def A {
+        action step1;
+        then action step2;
+        protected import Lib::*;
+    }
+}`);
+        expect(st.getSymbol('User::A')?.importTargets).toEqual([
+            { kind: 'namespace-shallow', target: 'Lib', visibility: 'protected' },
+        ]);
+    });
+
+    it('does not attribute a nested action\'s or package\'s imports to the enclosing element', async () => {
+        const { st } = await buildST(`${lib}
+package User {
+    action def A {
+        private import Lib::Engine;
+        action b { private import Lib::Wheel; }
+    }
+    calc def C {
+        private import Lib::Engine;
+        in x;
+        package S { private import Lib::Wheel; }
+        x
+    }
+}`);
+        expect(st.getSymbol('User::A')?.importTargets?.map(t => t.target)).toEqual(['Lib::Engine']);
+        expect(st.getSymbol('User::A::b')?.importTargets?.map(t => t.target)).toEqual(['Lib::Wheel']);
+        expect(st.getSymbol('User::C')?.importTargets?.map(t => t.target)).toEqual(['Lib::Engine']);
+        expect(st.getSymbol('User::C::S')?.importTargets?.map(t => t.target)).toEqual(['Lib::Wheel']);
+    });
+});

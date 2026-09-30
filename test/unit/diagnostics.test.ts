@@ -209,6 +209,58 @@ package User {
         });
     });
 
+    describe('import inside a non-definitionBody body (§8.2.2: interface, action, state, calc, requirement, case, view bodies)', () => {
+        it.each([
+            ['interface def', 'end e1; end e2;'],
+            ['action def', 'action step;'],
+            ['state def', 'state s;'],
+            ['calc def', 'in x;'],
+            ['constraint def', 'in x;'],
+            ['requirement def', 'subject s;'],
+            ['use case def', 'subject s;'],
+            ['view def', ''],
+        ])('should resolve a reference via an import declared inside a %s', async (keyword, members) => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    ${keyword} T {
+        ${members}
+        private import Lib::Engine;
+        attribute engine : Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Engine'"))).toBe(false);
+        });
+
+        it('should not leak an interface-body import outside that interface', async () => {
+            const text = `
+package Lib {
+    part def Engine;
+}
+
+package User {
+    interface def I {
+        end e1;
+        end e2;
+        private import Lib::Engine;
+    }
+    part def Unrelated {
+        part alsoEngine : Engine;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => (d.data as { elementName?: string } | undefined)?.elementName === 'alsoEngine')).toBe(true);
+        });
+    });
+
     describe('unresolved type references', () => {
         it('should flag a type that does not exist in the document', async () => {
             const text = `

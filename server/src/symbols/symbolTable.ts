@@ -193,6 +193,48 @@ const RE_DEFINED_BY = /definedby\s*([A-Za-z_]\w*(?:::\w+)*(?:\s*,\s*[A-Za-z_]\w*
  */
 const MAX_RULE_SEARCH_DEPTH = 6;
 
+/** Body rule of a package, searched by `extractImportTargets`. */
+const PACKAGE_BODY_RULES: ReadonlySet<number> = new Set([SysMLv2Parser.RULE_packageBody]);
+
+/**
+ * Body rules of a definition or usage that may own an `import` (§8.2.2).
+ * `enumerationBody` and `relationshipBody` are left out: the grammar allows
+ * no import there. `metadataBody` is left out too: a metadata usage gets no
+ * symbol yet, so its imports would have nowhere to be recorded.
+ */
+const ELEMENT_BODY_RULES: ReadonlySet<number> = new Set([
+    SysMLv2Parser.RULE_definitionBody,
+    SysMLv2Parser.RULE_interfaceBody,
+    SysMLv2Parser.RULE_actionBody,
+    SysMLv2Parser.RULE_stateDefBody,
+    SysMLv2Parser.RULE_stateUsageBody,
+    SysMLv2Parser.RULE_calculationBody,
+    SysMLv2Parser.RULE_requirementBody,
+    SysMLv2Parser.RULE_caseBody,
+    SysMLv2Parser.RULE_viewDefinitionBody,
+    SysMLv2Parser.RULE_viewBody,
+]);
+
+/**
+ * Body-item rules between a body and the `importRule`s it owns. Never
+ * includes a rule that starts a nested declaration, so imports of nested
+ * elements are not collected.
+ */
+const IMPORT_CONTAINER_RULES: ReadonlySet<number> = new Set([
+    SysMLv2Parser.RULE_packageBodyElement,
+    SysMLv2Parser.RULE_definitionBodyItem,
+    SysMLv2Parser.RULE_interfaceBodyItem,
+    SysMLv2Parser.RULE_actionBodyItem,
+    SysMLv2Parser.RULE_nonBehaviorBodyItem,
+    SysMLv2Parser.RULE_stateBodyItem,
+    SysMLv2Parser.RULE_calculationBodyPart,
+    SysMLv2Parser.RULE_calculationBodyItem,
+    SysMLv2Parser.RULE_requirementBodyItem,
+    SysMLv2Parser.RULE_caseBodyItem,
+    SysMLv2Parser.RULE_viewDefinitionBodyItem,
+    SysMLv2Parser.RULE_viewBodyItem,
+]);
+
 const RE_TYPING = /:(?![:>])\s*('[^']+'|[A-Za-z_]\w*(?:::\w+)*)/;
 const RE_QUOTED_NAME = /'([^']+)'/;
 const RE_IDENT_START = /^([A-Za-z_]\w*(?:::\w+)*)/;
@@ -1760,73 +1802,66 @@ export class SymbolTable {
 
     /**
      * Extract `import` statements owned directly by a namespace's body --
-     * a package's `packageBody`, or a definition/usage's `definitionBody`
-     * (usages reuse the same rule via `usageBody: definitionBody;`). Per
-     * §7.5.1, "all kinds of SysML definitions and usages are also
-     * namespaces... all rules discussed generically for namespaces...
-     * apply generically to packages, definitions and usages" -- an
-     * `import` inside e.g. `part def Vehicle { import Lib::Engine; ... }`
-     * is a real import of that definition's own namespace, not a no-op.
+     * a package's `packageBody`, or a definition/usage's own body in any of
+     * its grammar forms (`definitionBody`, `interfaceBody`, `actionBody`,
+     * `stateDefBody`, `calculationBody`, `requirementBody`, `caseBody`,
+     * `viewBody`, ...). Per §7.5.1, "all kinds of SysML definitions and
+     * usages are also namespaces", and §8.2.2 allows an `Import` in each of
+     * these bodies -- e.g. `interface def I { import Lib::Engine; ... }`.
      *
-     * Only searches the ONE body rule that matches `ownKind` (never tries
-     * `packageBody` for a definition/usage or vice versa), and the search
-     * itself never crosses into a nested named declaration's own body
-     * (`findOwnBodyRule`, not the unbounded `findRule`) -- without both of
-     * those, a definition containing a nested `package Sub { import ...; }`
-     * would have that nested package's *own* `packageBody` found first by
-     * an unbounded search (reachable via `definitionBody` →
-     * `definitionBodyItem` → ... → `package` → `packageBody`), wrongly
-     * attributing `Sub`'s own imports to the outer definition in place of
-     * the definition's own (the search stops at the first match).
+     * Only the element's own body is searched (`findOwnBodyRule` never
+     * crosses into a nested named declaration), and only through body-item
+     * rules (`IMPORT_CONTAINER_RULES`), so a nested `package Sub { import
+     * ...; }`'s imports are never attributed to the enclosing element.
      */
     private extractImportTargets(ctx: ParserRuleContext, ownKind: SysMLElementKind): ImportTarget[] {
-        if (ownKind === SysMLElementKind.Package) {
-            const packageBody = this.findOwnBodyRule(ctx, SysMLv2Parser.RULE_packageBody);
-            return packageBody ? this.extractImportsFromBody(packageBody, SysMLv2Parser.RULE_packageBodyElement) : [];
-        }
-
-        const definitionBody = this.findOwnBodyRule(ctx, SysMLv2Parser.RULE_definitionBody);
-        return definitionBody ? this.extractImportsFromBody(definitionBody, SysMLv2Parser.RULE_definitionBodyItem) : [];
+        const bodyRules = ownKind === SysMLElementKind.Package ? PACKAGE_BODY_RULES : ELEMENT_BODY_RULES;
+        const body = this.findOwnBodyRule(ctx, bodyRules);
+        if (!body) return [];
+        const results: ImportTarget[] = [];
+        this.collectImportsFromBody(body, results);
+        return results;
     }
 
     /**
-     * As `findRule`, but never descends into a child that starts its own
-     * named declaration (any rule mapped in `RULE_INDEX_TO_KIND`, e.g. a
-     * nested `package`/definition/usage) -- the same boundary
-     * `extractDocumentation` already enforces for the same reason ("a
-     * mapped child starts a contained element with independent [...]
-     * ownership"). Used to find a body rule that belongs to `ctx` itself,
-     * never one nested inside it.
+     * As `findRule`, but for the first rule in `ruleIndexes`, and never
+     * descends into a child that starts its own named declaration (any rule
+     * mapped in `RULE_INDEX_TO_KIND`, e.g. a nested `package`/definition/
+     * usage) -- the same boundary `extractDocumentation` already enforces.
+     * Used to find a body rule that belongs to `ctx` itself, never one
+     * nested inside it.
      */
-    private findOwnBodyRule(ctx: ParserRuleContext, ruleIndex: number, depth = 0): ParserRuleContext | undefined {
-        if (ctx.ruleIndex === ruleIndex) return ctx;
+    private findOwnBodyRule(ctx: ParserRuleContext, ruleIndexes: ReadonlySet<number>, depth = 0): ParserRuleContext | undefined {
+        if (ruleIndexes.has(ctx.ruleIndex)) return ctx;
         if (depth > MAX_RULE_SEARCH_DEPTH) return undefined;
         for (let i = 0; i < ctx.getChildCount(); i++) {
             const child = ctx.getChild(i);
             if (!(child instanceof ParserRuleContext)) continue;
-            if (child.ruleIndex === ruleIndex) return child;
+            if (ruleIndexes.has(child.ruleIndex)) return child;
             if (RULE_INDEX_TO_KIND.has(child.ruleIndex)) continue;
-            const found = this.findOwnBodyRule(child, ruleIndex, depth + 1);
+            const found = this.findOwnBodyRule(child, ruleIndexes, depth + 1);
             if (found) return found;
         }
         return undefined;
     }
 
-    /** Scan a body rule's direct `bodyItem`-kind children for an `importRule`, per `extractImportTargets`. */
-    private extractImportsFromBody(body: ParserRuleContext, bodyItemRuleIndex: number): ImportTarget[] {
-        const results: ImportTarget[] = [];
-        for (let j = 0; j < body.getChildCount(); j++) {
-            const bodyItem = body.getChild(j);
-            if (!(bodyItem instanceof ParserRuleContext) || bodyItem.ruleIndex !== bodyItemRuleIndex) continue;
-            for (let k = 0; k < bodyItem.getChildCount(); k++) {
-                const maybeImportRule = bodyItem.getChild(k);
-                if (maybeImportRule instanceof ParserRuleContext && maybeImportRule.ruleIndex === SysMLv2Parser.RULE_importRule) {
-                    const parsed = this.parseImportRule(maybeImportRule);
-                    if (parsed) results.push(parsed);
-                }
+    /**
+     * Collect the `importRule`s owned by `container` (a body, or a body-item
+     * rule within it), descending only through `IMPORT_CONTAINER_RULES` --
+     * e.g. `calculationBody` → `calculationBodyPart` → `calculationBodyItem`
+     * → `actionBodyItem` → `nonBehaviorBodyItem` → `importRule`.
+     */
+    private collectImportsFromBody(container: ParserRuleContext, results: ImportTarget[]): void {
+        for (let i = 0; i < container.getChildCount(); i++) {
+            const child = container.getChild(i);
+            if (!(child instanceof ParserRuleContext)) continue;
+            if (child.ruleIndex === SysMLv2Parser.RULE_importRule) {
+                const parsed = this.parseImportRule(child);
+                if (parsed) results.push(parsed);
+            } else if (IMPORT_CONTAINER_RULES.has(child.ruleIndex)) {
+                this.collectImportsFromBody(child, results);
             }
         }
-        return results;
     }
 
     /**
