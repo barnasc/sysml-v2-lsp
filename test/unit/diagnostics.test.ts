@@ -209,6 +209,44 @@ package User {
         });
     });
 
+    describe('calc usages', () => {
+        it('should not flag a calc usage typed by a known calc definition', async () => {
+            const text = `
+package Demo {
+    calc def Power;
+    calc power : Power {
+        attribute factor;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags).toEqual([]);
+        });
+
+        it('should flag an unresolved type on a calc usage', async () => {
+            const text = `
+package Demo {
+    calc power : Missing;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolvedDiags = diags.filter(d => d.code === 'unresolved-type');
+            expect(unresolvedDiags.some(d => d.message.includes("'Missing'"))).toBe(true);
+        });
+
+        it('should report two calc usages with the same name as ambiguous', async () => {
+            const text = `
+package Demo {
+    calc power;
+    calc power;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            expect(diags.some(d => d.code === 'ambiguous-namespace-name' && d.message.includes("'power'"))).toBe(true);
+        });
+    });
+
     describe('unresolved type references', () => {
         it('should flag a type that does not exist in the document', async () => {
             const text = `

@@ -835,3 +835,54 @@ package P {
         expect(toMetaclassName(SysMLElementKind.DecisionNode)).toBe('DecisionNode');
     });
 });
+
+describe('calc usages', () => {
+    it('creates a symbol for a named calc usage, with its typing and members', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    calc def Power;
+    part def Vehicle {
+        calc <p> power : Power {
+            in speed;
+            attribute factor;
+            speed
+        }
+    }
+}`);
+        expect(result.errors).toEqual([]);
+        const power = st.getSymbol('Demo::Vehicle::power');
+        expect(power?.kind).toBe('calc');
+        expect(power?.shortName).toBe('p');
+        expect(power?.typeNames).toEqual(['Power']);
+        expect(power?.parentQualifiedName).toBe('Demo::Vehicle');
+        expect(st.getSymbol('Demo::Vehicle::power::factor')?.parentQualifiedName).toBe('Demo::Vehicle::power');
+    });
+
+    it('creates symbols for calc usages nested in action and calc definitions and in other calc usages', async () => {
+        const { st } = await buildST(`
+package Demo {
+    action def A { calc c1; }
+    calc def D { calc c2; }
+    calc outer { calc inner; }
+}`);
+        expect(st.getSymbol('Demo::A::c1')?.kind).toBe('calc');
+        expect(st.getSymbol('Demo::D::c2')?.kind).toBe('calc');
+        expect(st.getSymbol('Demo::outer::inner')?.kind).toBe('calc');
+    });
+
+    it('does not name an anonymous calc usage after its type', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    calc def Power;
+    calc : Power;
+}`);
+        expect(result.errors).toEqual([]);
+        expect(st.getSymbol('Demo::Power')?.kind).toBe('calc def');
+        expect(st.getAllSymbols().filter(s => s.kind === 'calc')).toEqual([]);
+    });
+
+    it('names a calc usage declared with only a short name after that short name', async () => {
+        const { st } = await buildST('package Demo { calc <p>; }');
+        expect(st.getSymbol('Demo::p')?.kind).toBe('calc');
+    });
+});

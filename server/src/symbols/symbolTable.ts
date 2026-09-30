@@ -48,6 +48,7 @@ const RULE_INDEX_TO_KIND = new Map<number, SysMLElementKind>([
     [SysMLv2Parser.RULE_stateUsage, SysMLElementKind.StateUsage],                 // 357
     [SysMLv2Parser.RULE_requirementUsage, SysMLElementKind.RequirementUsage],     // 398
     [SysMLv2Parser.RULE_constraintUsage, SysMLElementKind.ConstraintUsage],       // 381
+    [SysMLv2Parser.RULE_calculationUsage, SysMLElementKind.CalcUsage],            // 376
     [SysMLv2Parser.RULE_itemUsage, SysMLElementKind.ItemUsage],                   // 245
     [SysMLv2Parser.RULE_allocationUsage, SysMLElementKind.AllocationUsage],       // 276
     [SysMLv2Parser.RULE_useCaseUsage, SysMLElementKind.UseCaseUsage],             // 419
@@ -77,6 +78,12 @@ const NAME_RULE_INDICES: ReadonlySet<number> = new Set([
     SysMLv2Parser.RULE_identification,  // 22
     SysMLv2Parser.RULE_name,            // 20
     SysMLv2Parser.RULE_qualifiedName,   // 44
+]);
+
+/** Declaration rules between a usage and the `identification` of its own name */
+const USAGE_DECLARATION_RULE_INDICES: ReadonlySet<number> = new Set([
+    SysMLv2Parser.RULE_actionUsageDeclaration,
+    SysMLv2Parser.RULE_usageDeclaration,
 ]);
 
 /** Rules that are prefix/extension contexts — should be skipped in name extraction */
@@ -1185,6 +1192,12 @@ export class SymbolTable {
             return undefined;
         }
 
+        // A calc usage may be anonymous (`calc : C;`), where the generic walk
+        // below would take the type's name as the usage's own.
+        if (ctx.ruleIndex === SysMLv2Parser.RULE_calculationUsage) {
+            return this.extractDeclaredUsageName(ctx);
+        }
+
         // Walk children looking for a name-producing rule or IDENT token
         for (let i = 0; i < ctx.getChildCount(); i++) {
             const child = ctx.getChild(i);
@@ -1225,6 +1238,25 @@ export class SymbolTable {
             }
         }
 
+        return undefined;
+    }
+
+    /**
+     * The name a usage declares for itself, or undefined when it is anonymous.
+     * Only follows the usage's own declaration down to its `identification`,
+     * never a typing, subsetting or other reference to another element.
+     */
+    private extractDeclaredUsageName(ctx: ParserRuleContext): string | undefined {
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (!(child instanceof ParserRuleContext)) continue;
+            if (child.ruleIndex === SysMLv2Parser.RULE_identification) {
+                return this.parseIdentification(child).name;
+            }
+            if (USAGE_DECLARATION_RULE_INDICES.has(child.ruleIndex)) {
+                return this.extractDeclaredUsageName(child);
+            }
+        }
         return undefined;
     }
 

@@ -222,6 +222,26 @@ package Test {
             expect(port!.attributes['portType']).toBe('PowerPort');
         });
 
+        it('should include a calc usage with its members', async () => {
+            const model = await getModelForText(`
+package Test {
+    calc def Power;
+    part def Vehicle {
+        calc power : Power {
+            attribute factor;
+        }
+    }
+}
+`, ['elements']);
+
+            const pkg = model.elements!.find(e => e.name === 'Test');
+            const vehicle = pkg!.children.find(e => e.name === 'Vehicle');
+            const power = vehicle?.children.find(e => e.name === 'power');
+            expect(power).toBeDefined();
+            expect(power!.type).toBe('calc');
+            expect(power!.children.map(c => c.name)).toEqual(['factor']);
+        });
+
         it('should use correct type strings matching extension expectations', async () => {
             const model = await getModelForText(`
 package Test {
