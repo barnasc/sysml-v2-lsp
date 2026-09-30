@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.32.0]
+
 ### Fixed
 
 - Fix false positive diagnostic `ambiguous-namespace-name`: normalize a `file:` URI's drive letter (lower-case letter and `%3A`/`%3a` decoded to `:`), so `file:///c%3A/...` and `file:///C:/...` identify the same document and it no longer reports each of its declarations as a conflict with itself. The rest of the URI stays case-sensitive.
