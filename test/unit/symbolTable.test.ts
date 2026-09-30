@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { SysMLSymbol } from '../../server/src/symbols/sysmlElements.js';
 
 /** Helper: parse text and build a symbol table */
 async function buildST(text: string, uri = 'test://test.sysml') {
@@ -142,6 +143,92 @@ package Demo {
         const connection = st.findByName('link');
         expect(connection).toHaveLength(1);
         expect(connection[0].kind).toBe('connection');
+    });
+
+    it('should name an anonymous interface usage after its ends\' reference paths', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    port def P { port p1; port p2; }
+    interface def I {
+        end source : P;
+        end target : ~P;
+    }
+    part assembly {
+        part a { port pa : P; }
+        part b { port pb : ~P; }
+        interface link : I
+            connect source ::> a.pa to target ::> b.pb {
+                interface source.p1 to target.p1;
+                interface source.p2 to target.p2;
+            }
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        // `interface source.p1 to target.p1;` declares no name -- `source` is an endpoint reference,
+        // so the interface is labelled after the whole path instead, and flagged as anonymous. Its
+        // qualified name has its declaration site appended; its name is not looked up.
+        expect(st.findByName('source').filter((s) => s.kind === 'interface')).toHaveLength(0);
+        const symbols = st.getSymbolsForUri('test://test.sysml');
+        for (const [path, line] of [['source.p1-target.p1', 13], ['source.p2-target.p2', 14]] as const) {
+            const [iface] = symbols.filter((s) => s.name === path);
+            expect(iface?.kind).toBe('interface');
+            expect(iface?.isAnonymous).toBe(true);
+            expect(iface?.qualifiedName).toBe(`Demo::assembly::link::${path}#test://test.sysml:${line}:17`);
+            expect(st.getSymbolByElementId(iface.elementId!)).toBe(iface);
+            expect(st.getSymbol(iface.qualifiedName)).toBeUndefined();
+            expect(st.findByName(path)).toEqual([]);
+        }
+        expect(st.findByName('link')[0].isAnonymous).toBeUndefined();
+    });
+
+    it('should give every anonymous interface usage that fans out from the same end a unique name', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    port def P { port p1; port p2; }
+    part assembly {
+        part a { port pa : P; }
+        part b { port pb : ~P; }
+        part c { port pc : ~P; }
+        interface a.pa to b.pb;
+        interface a.pa to c.pc;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const named = st.getSymbolsForUri('test://test.sysml').filter((s) => s.kind === 'interface');
+        // Fan-out from the same end differs by its other end.
+        expect(named.map((s) => s.name)).toEqual(['a.pa-b.pb', 'a.pa-c.pc']);
+        expect(named.every((s) => s.isAnonymous)).toBe(true);
+    });
+
+    it('should preserve names declared explicitly on interface usages', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    port def P { port p1; port p2; }
+    interface def I {
+        end source : P;
+        end target : ~P;
+    }
+    part assembly {
+        part a { port pa : P; }
+        part b { port pb : ~P; }
+        interface link : I
+            connect source ::> a.pa to target ::> b.pb {
+                interface source.p1 to target.p1;
+                interface source.p2 to target.p2;
+            }
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const link = st.findByName('link');
+        expect(link).toHaveLength(1);
+        expect(link[0].kind).toBe('interface');
+        expect(link[0].typeNames).toContain('I');
     });
 
     it('should extract transition endpoints without colliding with the source state', async () => {
@@ -833,5 +920,366 @@ package P {
         expect(toMetaclassName(SysMLElementKind.JoinNode)).toBe('JoinNode');
         expect(toMetaclassName(SysMLElementKind.MergeNode)).toBe('MergeNode');
         expect(toMetaclassName(SysMLElementKind.DecisionNode)).toBe('DecisionNode');
+    });
+});
+
+describe('anonymous connection usages', () => {
+    const text = `
+package Demo {
+    part a { port p; port q; }
+    part b { port p; }
+    part c { port p; }
+    part d { port p; }
+    connect a.p to b.p;
+    connect a.p to c.p;
+    connect (a.q, b.p, c.p, d.p);
+    connect e ::> d.p to b.p;
+}
+`;
+
+    it('names each after its ends\' reference paths, dash-joined', async () => {
+        const { st, result } = await buildST(text);
+        expect(result.errors).toHaveLength(0);
+        const connections = st.getSymbolsForUri('test://test.sysml').filter((s) => s.kind === 'connection');
+        // binary, fan-out from the same end, n-ary, and an end with its own name (`e ::> d.p` -> `d.p`)
+        expect(connections.map((s) => s.name)).toEqual(['a.p-b.p', 'a.p-c.p', 'a.q-b.p-c.p-d.p', 'd.p-b.p']);
+        expect(connections.every((s) => s.isAnonymous)).toBe(true);
+        expect(connections.map((s) => s.qualifiedName)).toContain('Demo::a.q-b.p-c.p-d.p#test://test.sysml:9:5');
+    });
+
+    it('keeps two anonymous connections with identical ends apart', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part a { port p; }
+    part b { port p; }
+    connect a.p to b.p;
+    connect a.p to b.p;
+}
+`);
+        expect(result.errors).toHaveLength(0);
+        const connections = st.getSymbolsForUri('test://test.sysml').filter((s) => s.kind === 'connection');
+        expect(connections.map((s) => [s.name, s.isAnonymous])).toEqual([['a.p-b.p', true], ['a.p-b.p', true]]);
+        expect(new Set(connections.map((s) => s.qualifiedName)).size).toBe(2);
+        // Neither shadows the other: each has its own elementId and is registered under it.
+        expect(new Set(connections.map((s) => s.elementId)).size).toBe(2);
+        for (const connection of connections) expect(st.getSymbolByElementId(connection.elementId!)).toBe(connection);
+        expect(st.getAllSymbols().filter((s) => s.kind === 'connection')).toHaveLength(2);
+    });
+
+    // A quoted name may spell out an anonymous connection's name exactly; in either source order,
+    // the declared connection keeps its qualified name and is the only one found by name.
+    for (const [order, body] of [
+        ['declared first', `connection 'a.p-b.p';\n    connect a.p to b.p;`],
+        ['anonymous first', `connect a.p to b.p;\n    connection 'a.p-b.p';`],
+    ] as const) {
+        it(`never lets an anonymous connection shadow a declared one quoted like its name (${order})`, async () => {
+            const { st, result } = await buildST(`
+package Demo {
+    part a { port p; }
+    part b { port p; }
+    ${body}
+}
+`);
+            expect(result.errors).toHaveLength(0);
+            const connections = st.getSymbolsForUri('test://test.sysml').filter((s) => s.kind === 'connection');
+            const declared = connections.find((s) => !s.isAnonymous)!;
+            const anonymous = connections.find((s) => s.isAnonymous)!;
+            expect([declared.name, anonymous.name]).toEqual(['a.p-b.p', 'a.p-b.p']);
+            expect(declared.qualifiedName).toBe('Demo::a.p-b.p');
+            expect(st.getSymbol('Demo::a.p-b.p')).toBe(declared);
+            expect(st.getSymbolByElementId(anonymous.elementId!)).toBe(anonymous);
+            expect(st.findByName('a.p-b.p')).toEqual([declared]);
+            expect(st.getGlobalScope().resolve('Demo')).toBeDefined();
+
+            const { buildSymbolIndexes, findConflictedQualifiedNames } = await import('../../server/src/symbols/namespaceResolver.js');
+            const indexes = buildSymbolIndexes(st.getAllSymbols());
+            expect(indexes.byName.get('a.p-b.p')).toEqual([declared]);
+            expect(indexes.byParent.get('Demo')).not.toContain(anonymous);
+            expect(indexes.byElementId.get(anonymous.elementId!)).toBe(anonymous);
+            expect(indexes.byQualifiedName.get(anonymous.qualifiedName)).toBeUndefined();
+            expect(findConflictedQualifiedNames(st.getAllSymbols()).size).toBe(0);
+        });
+    }
+
+    it('keeps the ends\' own parts as they are', async () => {
+        const { st } = await buildST(text);
+        expect(st.findByName('a').map((s) => s.kind)).toEqual(['part']);
+    });
+});
+
+describe('anonymous allocation usages', () => {
+    it('names each after its ends, never after its first end, and keeps a declared name', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part a; part b; part c;
+    allocate a to b;
+    allocate a to c;
+    allocation named allocate a to c;
+}
+`);
+        expect(result.errors).toHaveLength(0);
+        const allocations = st.getSymbolsForUri('test://test.sysml').filter((s) => s.kind === 'allocation');
+        expect(allocations.map((s) => [s.name, s.qualifiedName, s.isAnonymous])).toEqual([
+            ['a-b', 'Demo::a-b#test://test.sysml:4:5', true],
+            ['a-c', 'Demo::a-c#test://test.sysml:5:5', true],
+            ['named', 'Demo::named', undefined],
+        ]);
+        // The first end keeps its own name: only the part is found by it.
+        expect(st.findByName('a').map((s) => s.kind)).toEqual(['part']);
+
+        const { findConflictedQualifiedNames } = await import('../../server/src/symbols/namespaceResolver.js');
+        expect(findConflictedQualifiedNames(st.getAllSymbols()).size).toBe(0);
+    });
+});
+
+describe('anonymous transitions', () => {
+    // Two anonymous transitions between the same states on one line, and a declared one quoted like
+    // their generated name.
+    const text = `
+package Demo {
+    state def S {
+        state s1; state s2;
+        transition first s1 then s2; transition first s1 then s2;
+        transition '<transition s1 to s2>' first s2 then s1;
+    }
+}
+`;
+
+    it('names each after its states, keeps them apart, and never lets a quoted declared name shadow one', async () => {
+        const { st, result } = await buildST(text);
+        expect(result.errors).toHaveLength(0);
+        const transitions = st.getSymbolsForUri('test://test.sysml').filter((s) => s.kind === 'transition');
+        expect(transitions.map((s) => [s.name, s.qualifiedName, s.isAnonymous])).toEqual([
+            ['<transition s1 to s2>', 'Demo::S::<transition s1 to s2>#test://test.sysml:5:9', true],
+            ['<transition s1 to s2>', 'Demo::S::<transition s1 to s2>#test://test.sysml:5:38', true],
+            ['<transition s1 to s2>', 'Demo::S::<transition s1 to s2>', undefined],
+        ]);
+        for (const transition of transitions.slice(0, 2)) expect(st.getSymbolByElementId(transition.elementId!)).toBe(transition);
+        expect(st.getSymbol('Demo::S::<transition s1 to s2>')).toBe(transitions[2]);
+        expect(st.findByName('<transition s1 to s2>')).toEqual([transitions[2]]);
+
+        const { findConflictedQualifiedNames } = await import('../../server/src/symbols/namespaceResolver.js');
+        expect(findConflictedQualifiedNames(st.getAllSymbols()).size).toBe(0);
+    });
+});
+
+describe('findConflictedQualifiedNames and anonymous elements', () => {
+    // The same package reopened in two files, each with an anonymous interface and connection between
+    // the same ends, at the same position: all four are labelled `a.pa-b.pb`, but each keeps its own
+    // qualified name. Both files also declare `link`, a real conflict.
+    const fileA = `
+package Demo {
+    port def P { port p1; }
+    interface def I {
+        end source : P;
+        end target : ~P;
+    }
+    part a { port pa : P; }
+    part b { port pb : ~P; }
+    part c { port pc : ~P; }
+    interface a.pa to b.pb;
+    connect a.pa to b.pb;
+    interface link : I connect source ::> a.pa to target ::> b.pb;
+}
+`;
+    const fileB = `
+package Demo {
+    interface a.pa to b.pb;
+    connect a.pa to b.pb;
+    interface link : I connect source ::> a.pa to target ::> c.pc;
+}
+`;
+
+    it('excludes anonymous elements sharing a name across documents, but still reports declared duplicates', async () => {
+        const { findConflictedQualifiedNames } = await import('../../server/src/symbols/namespaceResolver.js');
+        const st = await buildMultiFileST([
+            { uri: 'test://a.sysml', text: fileA },
+            { uri: 'test://b.sysml', text: fileB },
+        ]);
+
+        const all = st.getAllSymbols();
+        const shared = all.filter((s) => s.name === 'a.pa-b.pb');
+        for (const kind of ['interface', 'connection']) {
+            expect(shared.filter((s) => s.kind === kind).map((s) => s.isAnonymous)).toEqual([true, true]);
+        }
+        expect(new Set(shared.map((s) => s.qualifiedName)).size).toBe(4);
+
+        const conflicts = findConflictedQualifiedNames(all);
+        expect([...conflicts.keys()]).toEqual(['Demo::link']);
+        expect(conflicts.get('Demo::link')).toHaveLength(2);
+    });
+});
+
+describe('anonymous elements indexed by elementId', () => {
+    // The elementId's value is implementation-defined: these tests only rely on it being present,
+    // unique, and a lookup key. The colliding declared name is built from whatever qualified name
+    // the anonymous interface actually gets, appended below it so its declaration site is unchanged.
+    const anonymousText = `package Demo {
+    part a { port p; }
+    part b { port p; }
+    interface a.p to b.p { attribute w; }
+    part c;
+}
+`;
+    const anonymousInterface = (st: { getSymbolsForUri(uri: string): SysMLSymbol[] }) =>
+        st.getSymbolsForUri('test://test.sysml').find((s) => s.kind === 'interface')!;
+
+    /** `anonymousText` plus a declared part quoted like the anonymous interface's qualified name. */
+    async function buildCollision() {
+        const { st: plain } = await buildST(anonymousText);
+        const qualifiedName = anonymousInterface(plain).qualifiedName;
+        const segment = qualifiedName.slice('Demo::'.length);
+        const text = anonymousText.replace('    part c;', `    part c;\n    part '${segment}' { part inner; }`);
+        return { ...(await buildST(text)), qualifiedName, text };
+    }
+
+    it('gives each anonymous element an elementId that finds it', async () => {
+        const { st } = await buildST(anonymousText);
+        const iface = anonymousInterface(st);
+        expect(iface.elementId).toBeTruthy();
+        expect(st.getSymbolByElementId(iface.elementId!)).toBe(iface);
+        expect(st.getSymbol(iface.qualifiedName)).toBeUndefined();
+        expect(st.getAllSymbols()).toContain(iface);
+        // Only anonymous elements carry one, for now.
+        expect(st.findByName('c')[0].elementId).toBeUndefined();
+    });
+
+    it('keeps an anonymous element\'s elementId when the same text is rebuilt', async () => {
+        const { st: first } = await buildST(anonymousText);
+        const { st: second } = await buildST(anonymousText);
+        expect(anonymousInterface(second).elementId).toBe(anonymousInterface(first).elementId);
+    });
+
+    it('never lets an anonymous element take over a declared qualified name', async () => {
+        const { st, result, qualifiedName } = await buildCollision();
+        expect(result.errors).toHaveLength(0);
+        const iface = anonymousInterface(st);
+        const declared = st.getSymbolsForUri('test://test.sysml').find((s) => s.qualifiedName === qualifiedName && !s.isAnonymous)!;
+        expect(iface.qualifiedName).toBe(qualifiedName);
+        expect(declared.kind).toBe('part');
+        expect(st.getSymbol(qualifiedName)).toBe(declared);
+        expect(st.getSymbolByElementId(iface.elementId!)).toBe(iface);
+
+        const { buildSymbolIndexes, findConflictedQualifiedNames } = await import('../../server/src/symbols/namespaceResolver.js');
+        const indexes = buildSymbolIndexes(st.getAllSymbols());
+        expect(indexes.byQualifiedName.get(qualifiedName)).toBe(declared);
+        expect(indexes.byElementId.get(iface.elementId!)).toBe(iface);
+        expect(findConflictedQualifiedNames(st.getAllSymbols()).size).toBe(0);
+    });
+
+    it('follows a member\'s parent link to its anonymous owner', async () => {
+        const { st } = await buildST(anonymousText);
+        const iface = anonymousInterface(st);
+        const member = st.findByName('w')[0];
+        expect(member.parentQualifiedName).toBe(iface.qualifiedName);
+        expect(member.parentElementId).toBe(iface.elementId);
+        expect(st.getOwner(member)).toBe(iface);
+        expect(st.getOwner(iface)).toBe(st.getSymbol('Demo'));
+
+        const { buildSymbolIndexes, ownerOf, NamespaceResolver } = await import('../../server/src/symbols/namespaceResolver.js');
+        const indexes = buildSymbolIndexes(st.getAllSymbols());
+        expect(ownerOf(member, indexes)).toBe(iface);
+        // The member still sees the enclosing package, through its anonymous owner.
+        expect([...new NamespaceResolver().namespaceAncestors(member, indexes)]).toEqual([iface, 'Demo', '']);
+    });
+
+    it('links each member to its own owner when a declared name is quoted like an anonymous qualified name', async () => {
+        const { st, qualifiedName } = await buildCollision();
+        const iface = anonymousInterface(st);
+        const declared = st.getSymbol(qualifiedName)!;
+        const w = st.findByName('w')[0];
+        const inner = st.findByName('inner')[0];
+        // Both members carry the same parentQualifiedName; only the anonymous owner's is marked by elementId.
+        expect([w.parentQualifiedName, inner.parentQualifiedName]).toEqual([qualifiedName, qualifiedName]);
+        expect([w.parentElementId, inner.parentElementId]).toEqual([iface.elementId, undefined]);
+        expect(st.getOwner(w)).toBe(iface);
+        expect(st.getOwner(inner)).toBe(declared);
+
+        const { buildSymbolIndexes, ownerOf, NamespaceResolver } = await import('../../server/src/symbols/namespaceResolver.js');
+        const indexes = buildSymbolIndexes(st.getAllSymbols());
+        expect(ownerOf(w, indexes)).toBe(iface);
+        expect(ownerOf(inner, indexes)).toBe(declared);
+        expect([...new NamespaceResolver().namespaceAncestors(w, indexes)]).toEqual([iface, 'Demo', '']);
+        expect([...new NamespaceResolver().namespaceAncestors(inner, indexes)]).toEqual([qualifiedName, 'Demo', '']);
+    });
+
+    it('marks only an anonymous element\'s direct members with its elementId', async () => {
+        const { st } = await buildST(`package Demo {
+    part a { port p; }
+    part b { port p; }
+    interface a.p to b.p { part x { part y; } }
+}
+`);
+        const iface = anonymousInterface(st);
+        const x = st.findByName('x')[0];
+        const y = st.findByName('y')[0];
+        expect(x.parentElementId).toBe(iface.elementId);
+        expect(y.parentElementId).toBeUndefined();
+        expect(st.getOwner(y)).toBe(x);
+        expect(st.getOwner(x)).toBe(iface);
+    });
+
+    it('keeps an anonymous namespace\'s members apart from a declared one quoted like its qualified name', async () => {
+        const { st, qualifiedName } = await buildCollision();
+        const iface = anonymousInterface(st);
+        const w = st.findByName('w')[0];
+        const inner = st.findByName('inner')[0];
+
+        const { buildSymbolIndexes, NamespaceResolver } = await import('../../server/src/symbols/namespaceResolver.js');
+        const indexes = buildSymbolIndexes(st.getAllSymbols());
+        expect(indexes.byParent.get(iface)).toEqual([w]);
+        expect(indexes.byParent.get(qualifiedName)).toEqual([inner]);
+
+        const resolver = new NamespaceResolver();
+        expect([...resolver.getResolvedMembers(iface, indexes).keys()]).toEqual(['w']);
+        expect([...resolver.getResolvedMembers(qualifiedName, indexes).keys()]).toEqual(['inner']);
+        // Each member sees its own namespace's members, not the other's.
+        expect(resolver.isLocallyVisible(w, 'w', indexes)).toBe(true);
+        expect(resolver.isLocallyVisible(w, 'inner', indexes)).toBe(false);
+        expect(resolver.isLocallyVisible(inner, 'inner', indexes)).toBe(true);
+        expect(resolver.isLocallyVisible(inner, 'w', indexes)).toBe(false);
+        // Both still see the enclosing package's members.
+        expect(resolver.isLocallyVisible(w, 'c', indexes)).toBe(true);
+        expect(resolver.isLocallyVisible(inner, 'c', indexes)).toBe(true);
+    });
+
+    // Anonymous interface and allocation usages next to declared elements quoted like their generated
+    // names, in either source order: the declared ones keep their names and are what those names resolve to.
+    for (const [order, body] of [
+        ['declared first', `part def 'a.p-b.p';\n    part def 'a-b';\n    interface a.p to b.p;\n    allocate a to b;`],
+        ['anonymous first', `interface a.p to b.p;\n    allocate a to b;\n    part def 'a.p-b.p';\n    part def 'a-b';`],
+    ] as const) {
+        it(`never lets an anonymous interface or allocation mask a declared name (${order})`, async () => {
+            const { st, result } = await buildST(`package Demo {
+    part a { port p; }
+    part b { port p; }
+    ${body}
+}
+`);
+            expect(result.errors).toHaveLength(0);
+            const { buildSymbolIndexes, NamespaceResolver } = await import('../../server/src/symbols/namespaceResolver.js');
+            const indexes = buildSymbolIndexes(st.getAllSymbols());
+            const members = new NamespaceResolver().getResolvedMembers('Demo', indexes);
+            for (const [name, kind] of [['a.p-b.p', 'interface'], ['a-b', 'allocation']] as const) {
+                const anonymous = st.getSymbolsForUri('test://test.sysml').find((s) => s.kind === kind)!;
+                expect([anonymous.name, anonymous.isAnonymous]).toEqual([name, true]);
+                const declared = st.getSymbol(`Demo::${name}`)!;
+                expect([declared.kind, declared.isAnonymous]).toEqual(['part def', undefined]);
+                expect(st.findByName(name)).toEqual([declared]);
+                expect(indexes.byName.get(name)).toEqual([declared]);
+                expect(members.get(name)?.map((m) => m.symbol)).toEqual([declared]);
+                expect(st.getSymbolByElementId(anonymous.elementId!)).toBe(anonymous);
+            }
+        });
+    }
+
+    it('drops an anonymous element from its indexes when its document is rebuilt without it', async () => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        const { st, qualifiedName, text } = await buildCollision();
+        const elementId = anonymousInterface(st).elementId!;
+        st.build('test://test.sysml', parseDocument(text.replace('interface a.p to b.p { attribute w; }', '')));
+        expect(st.getSymbolByElementId(elementId)).toBeUndefined();
+        expect(st.getSymbol(qualifiedName)?.kind).toBe('part');
+        expect(st.getAllSymbols().some((s) => s.isAnonymous)).toBe(false);
     });
 });

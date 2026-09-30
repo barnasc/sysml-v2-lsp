@@ -206,6 +206,8 @@ const RE_IDENT_START = /^([A-Za-z_]\w*(?:::\w+)*)/;
 export class SymbolTable {
     /** All symbols indexed by qualified name */
     private symbols = new Map<string, SysMLSymbol>();
+    /** Anonymous symbols (`SysMLSymbol.isAnonymous`) by `elementId` -- never in `symbols` */
+    private anonymousSymbols = new Map<string, SysMLSymbol>();
     /** All symbols indexed by URI for cross-file lookup */
     private symbolsByUri = new Map<string, SysMLSymbol[]>();
     /** All symbols indexed by simple name for O(1) lookup */
@@ -253,6 +255,20 @@ export class SymbolTable {
         return this.symbols.get(qualifiedName);
     }
 
+    /** Get an anonymous symbol (`SysMLSymbol.isAnonymous`) by its `elementId`. */
+    getSymbolByElementId(elementId: string): SysMLSymbol | undefined {
+        return this.anonymousSymbols.get(elementId);
+    }
+
+    /**
+     * Get `symbol`'s owner: its anonymous parent by `parentElementId`, else the
+     * declared symbol named by its `parentQualifiedName`.
+     */
+    getOwner(symbol: SysMLSymbol): SysMLSymbol | undefined {
+        if (symbol.parentElementId) return this.anonymousSymbols.get(symbol.parentElementId);
+        return symbol.parentQualifiedName ? this.symbols.get(symbol.parentQualifiedName) : undefined;
+    }
+
     /**
      * Find a symbol by name (simple name, not qualified).
      */
@@ -273,7 +289,7 @@ export class SymbolTable {
      */
     getAllSymbols(): SysMLSymbol[] {
         if (!this.allSymbolsCache) {
-            const all = Array.from(this.symbols.values());
+            const all = [...this.symbols.values(), ...this.anonymousSymbols.values()];
             // `symbols` holds only one entry per qualifiedName; a genuine
             // naming conflict (see `conflictedSymbolsByQualifiedName`'s doc
             // comment) needs every conflicting declaration surfaced here, not
@@ -426,7 +442,9 @@ export class SymbolTable {
                 // `sym` out of conflict tracking, so that fallback still sees
                 // the full picture, `sym` included -- see
                 // `unregisterPlainSymbol`'s own doc comment.
-                if (sym.kind === SysMLElementKind.Package) {
+                if (sym.isAnonymous) {
+                    this.unregisterAnonymousSymbol(sym);
+                } else if (sym.kind === SysMLElementKind.Package) {
                     this.unregisterPackageFragment(sym.qualifiedName, uri);
                 } else {
                     this.unregisterPlainSymbol(sym);
@@ -541,6 +559,7 @@ export class SymbolTable {
         uri: string,
         currentScope: Scope,
         parentQualifiedName: string,
+        parentElementId?: string,
     ): void {
         const ruleName = this.getRuleName(ctx);
 
@@ -550,6 +569,7 @@ export class SymbolTable {
         let childScope = currentScope;
 
         if (symbol) {
+            if (parentElementId) symbol.parentElementId = parentElementId;
             this.registerSymbol(symbol, uri, currentScope);
             // Create a child scope for definitions and packages
             childScope = new Scope(symbol.qualifiedName, currentScope);
@@ -569,6 +589,7 @@ export class SymbolTable {
                     uri,
                     childScope,
                     symbol?.qualifiedName ?? parentQualifiedName,
+                    symbol ? symbol.elementId : parentElementId,
                 );
             }
         }
@@ -747,7 +768,24 @@ export class SymbolTable {
         this.symbols.delete(sym.qualifiedName);
     }
 
+    /** Remove an anonymous symbol (on document edit/close) from its own indexes. */
+    private unregisterAnonymousSymbol(sym: SysMLSymbol): void {
+        if (this.anonymousSymbols.get(sym.elementId!) === sym) this.anonymousSymbols.delete(sym.elementId!);
+    }
+
     private registerSymbol(symbol: SysMLSymbol, uri: string, scope: Scope): void {
+        // An anonymous symbol is indexed by its elementId, never by qualifiedName,
+        // so a declared name quoted like its qualifiedName is never shadowed.
+        if (symbol.isAnonymous) {
+            this.anonymousSymbols.set(symbol.elementId!, symbol);
+        } else {
+            this.registerNamedSymbol(symbol, uri);
+        }
+        this.indexSymbol(symbol, uri, scope);
+    }
+
+    /** Register a declared symbol in `symbols`, tracking conflicts and package fragments. */
+    private registerNamedSymbol(symbol: SysMLSymbol, uri: string): void {
         const existing = this.symbols.get(symbol.qualifiedName);
         const bothPackages = symbol.kind === SysMLElementKind.Package && existing?.kind === SysMLElementKind.Package;
         if (existing && existing !== symbol && !bothPackages) {
@@ -769,15 +807,21 @@ export class SymbolTable {
             fragments.set(uri, symbol);
             this.mergePackageFragments(symbol.qualifiedName);
         }
+    }
+
+    /** Add a symbol to the per-URI, name, position and type-name indexes and to `scope`. */
+    private indexSymbol(symbol: SysMLSymbol, uri: string, scope: Scope): void {
         // Invalidate cached array
         this.allSymbolsCache = undefined;
         const uriSymbols = this.symbolsByUri.get(uri) ?? [];
         uriSymbols.push(symbol);
         this.symbolsByUri.set(uri, uriSymbols);
-        // Maintain name index
-        const nameList = this.symbolsByName.get(symbol.name) ?? [];
-        nameList.push(symbol);
-        this.symbolsByName.set(symbol.name, nameList);
+        // Maintain name index -- an anonymous element's label is not a name to look up
+        if (!symbol.isAnonymous) {
+            const nameList = this.symbolsByName.get(symbol.name) ?? [];
+            nameList.push(symbol);
+            this.symbolsByName.set(symbol.name, nameList);
+        }
         // Maintain position-sorted index (insertion sort — symbols arrive
         // in document order so this is nearly always an append → O(1) amortized)
         const posList = this.symbolsByPosition.get(uri) ?? [];
@@ -812,7 +856,7 @@ export class SymbolTable {
             refList.push(symbol);
             this.typeNameRefs.set(tn, refList);
         }
-        scope.define(symbol);
+        if (!symbol.isAnonymous) scope.define(symbol);
     }
 
     /**
@@ -932,26 +976,19 @@ export class SymbolTable {
             ? this.extractTransitionDetails(ctx)
             : undefined;
 
-        // Anonymous transitions still need symbols so their endpoints can be
-        // exposed to diagram consumers. Give them a readable, location-based
-        // synthetic name rather than incorrectly using the source state name.
-        const name = transition
-            ? transition.declaredName ?? (
-                transition.source && transition.target
-                    ? `<transition ${transition.source} to ${transition.target}>#${range.start.line + 1}`
-                    : undefined
-            )
-            : this.extractName(ctx);
+        const declaredName = transition ? transition.declaredName : this.extractName(ctx);
+        // An anonymous transition, connection, interface or allocation usage still gets a
+        // symbol (`generateAnonymousName`).
+        const anonymous = declaredName ? undefined : this.generateAnonymousName(ctx, transition, parentQualifiedName, uri, range);
+        const name = declaredName ?? anonymous?.name;
         if (!name) {
             return undefined;
         }
-        // Transitions synthesize their own name above and never carry a
-        // declared <shortName> alias.
+        // Transitions never carry a declared <shortName> alias.
         const shortName = transition ? undefined : this.extractShortName(ctx);
 
-        const qualifiedName = parentQualifiedName
-            ? `${parentQualifiedName}::${name}`
-            : name;
+        const qualifiedName = anonymous?.qualifiedName
+            ?? (parentQualifiedName ? `${parentQualifiedName}::${name}` : name);
 
         const selectionRange = transition && !transition.declaredName
             ? range
@@ -984,6 +1021,8 @@ export class SymbolTable {
 
         return {
             name,
+            isAnonymous: anonymous ? true : undefined,
+            elementId: anonymous?.elementId,
             shortName,
             kind,
             qualifiedName,
@@ -1161,28 +1200,25 @@ export class SymbolTable {
      * Looks for an IDENT token or a name/identification sub-rule.
      */
     private extractName(ctx: ParserRuleContext): string | undefined {
-        // A connection usage may omit its declaration entirely:
-        // `connect source.port to target.port;`. In that form, the first
-        // identifier below the context belongs to the source endpoint, not to
-        // the connection. Only an explicit usage declaration can name it.
+        // A connection, interface or allocation usage may omit its declaration
+        // entirely: `connect source.port to target.port;` / `interface source.p
+        // to target.p;` / `allocate a to b;`. In that form, the first identifier
+        // below the context belongs to the source endpoint, not to the
+        // connector. Only an explicit usage declaration can name it -- directly
+        // under a connection usage, one level down (in interfaceUsageDeclaration
+        // / allocationUsageDeclaration) under an interface or allocation usage.
+        // Without one, the symbol builder synthesizes a name instead
+        // (`generateAnonymousName`).
         if (ctx.ruleIndex === SysMLv2Parser.RULE_connectionUsage) {
-            for (let i = 0; i < ctx.getChildCount(); i++) {
-                const child = ctx.getChild(i);
-                if (!(child instanceof ParserRuleContext) ||
-                    child.ruleIndex !== SysMLv2Parser.RULE_usageDeclaration) {
-                    continue;
-                }
-
-                for (let j = 0; j < child.getChildCount(); j++) {
-                    const declarationChild = child.getChild(j);
-                    if (declarationChild instanceof ParserRuleContext &&
-                        declarationChild.ruleIndex === SysMLv2Parser.RULE_identification) {
-                        return this.parseIdentification(declarationChild).name;
-                    }
-                }
-                return undefined;
-            }
-            return undefined;
+            return this.extractDeclaredUsageName(ctx);
+        }
+        if (ctx.ruleIndex === SysMLv2Parser.RULE_interfaceUsage) {
+            const declaration = this.findChildRule(ctx, SysMLv2Parser.RULE_interfaceUsageDeclaration);
+            return declaration ? this.extractDeclaredUsageName(declaration) : undefined;
+        }
+        if (ctx.ruleIndex === SysMLv2Parser.RULE_allocationUsage) {
+            const declaration = this.findChildRule(ctx, SysMLv2Parser.RULE_allocationUsageDeclaration);
+            return declaration ? this.extractDeclaredUsageName(declaration) : undefined;
         }
 
         // Walk children looking for a name-producing rule or IDENT token
@@ -1225,6 +1261,82 @@ export class SymbolTable {
             }
         }
 
+        return undefined;
+    }
+
+    /**
+     * The name, qualified name and elementId of an element without a declared
+     * name: an anonymous transition (`<transition s1 to s2>`), or connection,
+     * interface or allocation usage (its ends, `a.p-b.q`). The elementId is its
+     * declaration site (`file:///a.sysml:12:5`), which the qualified name
+     * appends (`Demo::a.p-b.q#file:///a.sysml:12:5`). Undefined for any other element.
+     */
+    private generateAnonymousName(
+        ctx: ParserRuleContext,
+        transition: { source?: string; target?: string } | undefined,
+        parentQualifiedName: string,
+        uri: string,
+        range: Range,
+    ): { name: string; qualifiedName: string; elementId: string } | undefined {
+        const name = transition
+            ? (transition.source && transition.target ? `<transition ${transition.source} to ${transition.target}>` : undefined)
+            : this.connectorEndsLabel(ctx);
+        if (!name) return undefined;
+        const elementId = `${uri}:${range.start.line + 1}:${range.start.character + 1}`;
+        const segment = `${name}#${elementId}`;
+        return { name, qualifiedName: parentQualifiedName ? `${parentQualifiedName}::${segment}` : segment, elementId };
+    }
+
+    /**
+     * A connection, interface or allocation usage's end reference paths,
+     * dash-joined in declaration order (`source.p1-target.p1` for `interface
+     * source.p1 to target.p1;`). Read from its own end part only; undefined for any other
+     * element, or one without ends.
+     */
+    private connectorEndsLabel(ctx: ParserRuleContext): string | undefined {
+        let endPart: ParserRuleContext | undefined;
+        if (ctx.ruleIndex === SysMLv2Parser.RULE_connectionUsage) {
+            endPart = this.findChildRule(ctx, SysMLv2Parser.RULE_connectorPart);
+        } else if (ctx.ruleIndex === SysMLv2Parser.RULE_interfaceUsage) {
+            const declaration = this.findChildRule(ctx, SysMLv2Parser.RULE_interfaceUsageDeclaration);
+            endPart = declaration && this.findChildRule(declaration, SysMLv2Parser.RULE_interfacePart);
+        } else if (ctx.ruleIndex === SysMLv2Parser.RULE_allocationUsage) {
+            const declaration = this.findChildRule(ctx, SysMLv2Parser.RULE_allocationUsageDeclaration);
+            endPart = declaration && this.findChildRule(declaration, SysMLv2Parser.RULE_connectorPart);
+        }
+        if (!endPart) return undefined;
+        const references: ParserRuleContext[] = [];
+        this.collectDescendantRules(endPart, SysMLv2Parser.RULE_ownedReferenceSubsetting, references);
+        return references.map((reference) => reference.getText()).join('-') || undefined;
+    }
+
+    /** Every outermost node of rule `ruleIndex` below `ctx`, in source order, into `out`. */
+    private collectDescendantRules(ctx: ParserRuleContext, ruleIndex: number, out: ParserRuleContext[]): void {
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (!(child instanceof ParserRuleContext)) continue;
+            if (child.ruleIndex === ruleIndex) out.push(child);
+            else this.collectDescendantRules(child, ruleIndex, out);
+        }
+    }
+
+    /**
+     * The name declared by `ctx`'s own `usageDeclaration → identification`
+     * child, or undefined when it has none (an anonymous connector usage,
+     * whose first identifier is an endpoint reference, not its name).
+     */
+    private extractDeclaredUsageName(ctx: ParserRuleContext): string | undefined {
+        const declaration = this.findChildRule(ctx, SysMLv2Parser.RULE_usageDeclaration);
+        const identification = declaration && this.findChildRule(declaration, SysMLv2Parser.RULE_identification);
+        return identification ? this.parseIdentification(identification).name : undefined;
+    }
+
+    /** The first direct child of `ctx` that is a parse-tree node of rule `ruleIndex`. */
+    private findChildRule(ctx: ParserRuleContext, ruleIndex: number): ParserRuleContext | undefined {
+        for (let i = 0; i < ctx.getChildCount(); i++) {
+            const child = ctx.getChild(i);
+            if (child instanceof ParserRuleContext && child.ruleIndex === ruleIndex) return child;
+        }
         return undefined;
     }
 

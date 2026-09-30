@@ -377,6 +377,29 @@ package Test {
             expect(constraintDiags.length).toBeGreaterThanOrEqual(1);
         });
 
+        it('should resolve constraint references from an anonymous interface\'s own members', async () => {
+            const text = `
+package Test {
+    part def X { attribute v; }
+    part a { port p; }
+    part b { port p; }
+    interface a.p to b.p {
+        part x : X;
+        // \`z\` has no members of its own: the check climbs to the anonymous interface.
+        part z {
+            assert constraint { x.v > 0 }
+            assert constraint { x.nope > 0 }
+        }
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolved = diags.filter(d => d.code === 'unresolved-constraint-reference');
+            expect(unresolved.map(d => d.message)).toEqual([
+                "Unresolved constraint reference 'x.nope' in scope 'a.p-b.p'",
+            ]);
+        });
+
         it('should emit targeted invalid-constraint-body for documentation text', async () => {
             const text = `
 package Test {
@@ -1965,6 +1988,81 @@ part def Container :> Container::Child {
             expect(unresolvedDiags.filter(d => d.message.includes('Vehicle::Engine')).length).toBe(2);
         });
 
+        describe('anonymous elements as namespaces', () => {
+            const unresolvedElements = async (text: string) =>
+                (await getSemanticDiagnostics(text))
+                    .filter(d => d.code === 'unresolved-type')
+                    .map(d => (d.data as { elementName?: string } | undefined)?.elementName);
+
+            it('should resolve a name imported by an anonymous connection for its own members', async () => {
+                const text = `
+package Lib {
+    part def Engine;
+}
+package User {
+    part a { port p; }
+    part b { port p; }
+    connect a.p to b.p {
+        private import Lib::Engine;
+        part engine : Engine;
+    }
+    part outside : Engine;
+}
+`;
+                const unresolved = await unresolvedElements(text);
+                expect(unresolved).toEqual(['outside']);
+            });
+
+            it('should let a typed anonymous connection see its type\'s protected-imported members', async () => {
+                const text = `
+package Lib {
+    part def Engine;
+}
+package User {
+    connection def C {
+        end e1;
+        end e2;
+        protected import Lib::Engine;
+    }
+    part a { port p; }
+    part b { port p; }
+    connection : C connect a.p to b.p {
+        part engine : C::Engine;
+    }
+    part unrelated : C::Engine;
+}
+`;
+                const unresolved = await unresolvedElements(text);
+                expect(unresolved).toEqual(['unrelated']);
+            });
+
+            it('should resolve a specialization\'s supertype from inside its anonymous owner', async () => {
+                // \`Local\` is only visible inside the anonymous interface, where \`x\` specializes it.
+                const text = `
+package Lib {
+    part def Engine;
+}
+package User {
+    part a { port p; }
+    part b { port p; }
+    interface a.p to b.p {
+        part def Local {
+            protected import Lib::Engine;
+        }
+        part x : Local {
+            part engine : Local::Engine;
+        }
+        part y {
+            part engine : Local::Engine;
+        }
+    }
+}
+`;
+                const unresolved = await unresolvedElements(text);
+                expect(unresolved).toEqual(['engine']);
+            });
+        });
+
         describe('incremental visibility changes are reassessed on re-parse', () => {
             // Resolution results must not be stale-cached across edits: an
             // import's own visibility keyword is just as much a part of a
@@ -2821,5 +2919,135 @@ package External {
             );
             expect(diags.filter(d => d.code === 'unresolved-type')).toHaveLength(0);
         });
+    });
+});
+
+describe('Anonymous interface usages', () => {
+    it('does not report nested anonymous interfaces as ambiguous names', async () => {
+        // Each `interface source.pN to target.pN;` is anonymous (spec 7.14): its first identifier is
+        // an endpoint reference, so several of them in one body must not collide on that name.
+        const diagnostics = await getSemanticDiagnostics(`
+package Demo {
+    port def P { port p1; port p2; }
+    interface def I {
+        end source : P;
+        end target : ~P;
+    }
+    part assembly {
+        part a { port pa : P; }
+        part b { port pb : ~P; }
+        interface link : I
+            connect source ::> a.pa to target ::> b.pb {
+                interface source.p1 to target.p1;
+                interface source.p2 to target.p2;
+            }
+    }
+}
+`);
+        expect(diagnostics.filter((d) => d.code === 'ambiguous-namespace-name')).toEqual([]);
+    });
+
+    it('does not report anonymous interfaces fanning out from the same end as ambiguous', async () => {
+        // Named `a.pa-b.pb` and `a.pa-c.pc` after their ends -- synthesized, never declared.
+        const diagnostics = await getSemanticDiagnostics(`
+package Demo {
+    port def P { port p1; port p2; }
+    part assembly {
+        part a { port pa : P; }
+        part b { port pb : ~P; }
+        part c { port pc : ~P; }
+        interface a.pa to b.pb;
+        interface a.pa to c.pc;
+    }
+}
+`);
+        expect(diagnostics.filter((d) => d.code === 'ambiguous-namespace-name')).toEqual([]);
+    });
+
+    it('reports declared duplicates across documents, but not anonymous elements sharing a synthesized name', async () => {
+        // Each file's anonymous interface and connection are both named `a.pa-b.pb`, at the same
+        // position in both files; both files also declare `link`.
+        const fileA = `
+package Demo {
+    port def P { port p1; }
+    interface def I {
+        end source : P;
+        end target : ~P;
+    }
+    part a { port pa : P; }
+    part b { port pb : ~P; }
+    part c { port pc : ~P; }
+    interface a.pa to b.pb;
+    connect a.pa to b.pb;
+    interface link : I connect source ::> a.pa to target ::> b.pb;
+}
+`;
+        const fileB = `
+package Demo {
+    interface a.pa to b.pb;
+    connect a.pa to b.pb;
+    interface link : I connect source ::> a.pa to target ::> c.pc;
+}
+`;
+        const entries = [
+            { uri: 'file:///ws/a.sysml', text: fileA },
+            { uri: 'file:///ws/b.sysml', text: fileB },
+        ];
+        for (const uri of ['file:///ws/a.sysml', 'file:///ws/b.sysml']) {
+            const ambiguous = (await getSemanticDiagnosticsForUri(entries, uri)).filter((d) => d.code === 'ambiguous-namespace-name');
+            expect(ambiguous.map((d) => d.message.match(/'([^']+)'/)?.[1])).toEqual(['link']);
+        }
+    });
+});
+
+describe('Anonymous connectors and transitions next to declared names', () => {
+    const ambiguousNames = async (text: string) =>
+        (await getSemanticDiagnostics(text))
+            .filter((d) => d.code === 'ambiguous-namespace-name')
+            .map((d) => d.message.match(/'([^']+)'/)?.[1]);
+
+    for (const [order, body] of [
+        ['declared first', `connection 'a.p-b.p';\n    connect a.p to b.p;`],
+        ['anonymous first', `connect a.p to b.p;\n    connection 'a.p-b.p';`],
+    ] as const) {
+        it(`does not report a declared connection quoted like an anonymous one's name (${order})`, async () => {
+            expect(await ambiguousNames(`
+package Demo {
+    part a { port p; }
+    part b { port p; }
+    ${body}
+}
+`)).toEqual([]);
+        });
+    }
+
+    it('does not report anonymous duplicates: connections with identical ends, allocations from the same end, transitions on one line', async () => {
+        expect(await ambiguousNames(`
+package Demo {
+    part a { port p; }
+    part b { port p; }
+    part c;
+    connect a.p to b.p;
+    connect a.p to b.p;
+    allocate a to b;
+    allocate a to c;
+    state def S {
+        state s1; state s2;
+        transition first s1 then s2; transition first s1 then s2;
+    }
+}
+`)).toEqual([]);
+    });
+
+    it('still reports a declared name quoted twice', async () => {
+        expect(await ambiguousNames(`
+package Demo {
+    part a { port p; }
+    part b { port p; }
+    connect a.p to b.p;
+    connection 'a.p-b.p';
+    connection 'a.p-b.p';
+}
+`)).toEqual(['a.p-b.p', 'a.p-b.p']);
     });
 });

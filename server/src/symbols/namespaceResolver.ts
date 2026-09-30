@@ -15,10 +15,20 @@
 import { canonicalUri, isSameDocumentUri } from '../utils/documentUri.js';
 import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isDefinition, isUsage } from './sysmlElements.js';
 
+/**
+ * A namespace's identity for name resolution: a declared one by its
+ * qualifiedName (`''` for the root), an anonymous one by its own symbol, so a
+ * declared name quoted like an anonymous qualifiedName never shares its members.
+ */
+export type NamespaceKey = string | SysMLSymbol;
+
 export interface SymbolIndexes {
     byName: Map<string, SysMLSymbol[]>;
-    byParent: Map<string, SysMLSymbol[]>;
+    /** Named members by owning namespace (`NamespaceKey`); `''` holds the root's. */
+    byParent: Map<NamespaceKey, SysMLSymbol[]>;
     byQualifiedName: Map<string, SysMLSymbol>;
+    /** Anonymous symbols (`SysMLSymbol.isAnonymous`) by `elementId` -- never in `byQualifiedName`. */
+    byElementId: Map<string, SysMLSymbol>;
     definitionsByName: Map<string, SysMLSymbol[]>;
     portsByName: Map<string, SysMLSymbol[]>;
 }
@@ -86,6 +96,8 @@ const MAX_NAMESPACE_NESTING_DEPTH = 64;
 export function findConflictedQualifiedNames(allSymbols: SysMLSymbol[]): Map<string, SysMLSymbol[]> {
     const byQualifiedNameAndKind = new Map<string, Map<SysMLElementKind, SysMLSymbol[]>>();
     for (const s of allSymbols) {
+        // An anonymous element (`SysMLSymbol.isAnonymous`) declares no name, so it can't conflict.
+        if (s.isAnonymous) continue;
         let byKind = byQualifiedNameAndKind.get(s.qualifiedName);
         if (!byKind) {
             byKind = new Map();
@@ -179,8 +191,9 @@ export function describeConflictingDeclarations(others: SysMLSymbol[], fromUri: 
 /** Build the byName/byParent/byQualifiedName/etc. indexes a `NamespaceResolver` (and other checks) need from a flat symbol array. */
 export function buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
     const byName = new Map<string, SysMLSymbol[]>();
-    const byParent = new Map<string, SysMLSymbol[]>();
+    const byParent = new Map<NamespaceKey, SysMLSymbol[]>();
     const byQualifiedName = new Map<string, SysMLSymbol>();
+    const byElementId = new Map<string, SysMLSymbol>();
     const definitionsByName = new Map<string, SysMLSymbol[]>();
     const portsByName = new Map<string, SysMLSymbol[]>();
 
@@ -199,7 +212,17 @@ export function buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
     // declaration.
     const conflictedQualifiedNames = new Set(findConflictedQualifiedNames(allSymbols).keys());
 
+    // An anonymous element (`SysMLSymbol.isAnonymous`) is reachable only by its
+    // elementId: its generated name is not a member name to resolve, and a declared
+    // name quoted like its qualifiedName must not be shadowed by it. Indexed first,
+    // so its members below can be keyed by it.
     for (const s of allSymbols) {
+        if (s.isAnonymous) byElementId.set(s.elementId!, s);
+    }
+    const indexes: SymbolIndexes = { byName, byParent, byQualifiedName, byElementId, definitionsByName, portsByName };
+
+    for (const s of allSymbols) {
+        if (s.isAnonymous) continue;
         const nameList = byName.get(s.name) ?? [];
         nameList.push(s);
         byName.set(s.name, nameList);
@@ -211,8 +234,8 @@ export function buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
         // Root-level symbols (no parentQualifiedName) are keyed under '', the
         // implicit root namespace -- mirrors the '' sentinel used for namespace
         // ancestor chains, so byParent.get('') gives the root's own members.
-        const parentKey = s.parentQualifiedName ?? '';
-        if (!conflictedQualifiedNames.has(parentKey)) {
+        const parentKey = ownerKeyOf(s, indexes.byElementId);
+        if (typeof parentKey !== 'string' || !conflictedQualifiedNames.has(parentKey)) {
             const children = byParent.get(parentKey) ?? [];
             children.push(s);
             byParent.set(parentKey, children);
@@ -231,7 +254,30 @@ export function buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
         }
     }
 
-    return { byName, byParent, byQualifiedName, definitionsByName, portsByName };
+    return indexes;
+}
+
+/**
+ * `symbol`'s owner: its anonymous parent by `parentElementId`, else the
+ * declared symbol named by its `parentQualifiedName`.
+ */
+export function ownerOf(symbol: SysMLSymbol, indexes: SymbolIndexes): SysMLSymbol | undefined {
+    if (symbol.parentElementId) return indexes.byElementId.get(symbol.parentElementId);
+    return symbol.parentQualifiedName ? indexes.byQualifiedName.get(symbol.parentQualifiedName) : undefined;
+}
+
+/** The `NamespaceKey` of `symbol` as a namespace: itself if anonymous, else its qualifiedName. */
+export function namespaceKeyOf(symbol: SysMLSymbol): NamespaceKey {
+    return symbol.isAnonymous ? symbol : symbol.qualifiedName;
+}
+
+/**
+ * The `NamespaceKey` of the namespace owning `symbol`: its anonymous parent
+ * (looked up in `anonymousById`), else its `parentQualifiedName`, else the root (`''`).
+ */
+export function ownerKeyOf(symbol: SysMLSymbol, anonymousById: ReadonlyMap<string, SysMLSymbol>): NamespaceKey {
+    const anonymousOwner = symbol.parentElementId ? anonymousById.get(symbol.parentElementId) : undefined;
+    return anonymousOwner ?? symbol.parentQualifiedName ?? '';
 }
 
 /** AND together zero or more (possibly undefined) filter expressions; `undefined` means "no filter". */
@@ -273,9 +319,9 @@ export function evaluateFilter(expr: FilterExpr, symbol: SysMLSymbol): boolean {
  * multiple resolutions against the same workspace snapshot are cheap.
  */
 export class NamespaceResolver {
-    private resolvedMembersByIndexes?: WeakMap<SymbolIndexes, Map<string, Map<string, ResolvedMember[]>>>;
-    /** `(candidateQualifiedName, ownerQualifiedName)` pairs currently mid-check in `isSpecializationOf`, guarding against re-entrant recursion (see its own doc comment). */
-    private specializationChecksInProgress = new Set<string>();
+    private resolvedMembersByIndexes?: WeakMap<SymbolIndexes, Map<NamespaceKey, Map<string, ResolvedMember[]>>>;
+    /** `(candidate, ownerQualifiedName)` pairs currently mid-check in `isSpecializationOf`, guarding against re-entrant recursion (see its own doc comment). */
+    private specializationChecksInProgress = new Map<SysMLSymbol, Set<string>>();
 
     /**
      * Whether `name` (simple or qualified, e.g. `"Owner::Nested::Target"`) is
@@ -289,12 +335,12 @@ export class NamespaceResolver {
      * namespace.
      */
     isLocallyVisible(symbol: SysMLSymbol, name: string, indexes: SymbolIndexes): boolean {
-        return this.resolveQualifiedNameFrom(symbol.parentQualifiedName, name, indexes) !== undefined;
+        return this.resolveQualifiedNameFrom(ownerKeyOf(symbol, indexes.byElementId), name, indexes) !== undefined;
     }
 
     /**
      * Resolve a (possibly qualified) name to its symbol per §7.5.1, searching
-     * outward from `startQualifiedName`'s enclosing namespaces (its own resolved
+     * outward from namespace `start` and its enclosing namespaces (its own resolved
      * members first, then its parent's, ...). Shared by `isLocallyVisible` (an
      * ordinary reference resolving relative to its own enclosing namespace) and
      * import-target resolution (an `import` declaration's target is itself a
@@ -302,12 +348,12 @@ export class NamespaceResolver {
      * name -- so a bare `import C;` inside a nested package can pick up a `C`
      * its own enclosing package already imported, per §7.5.1/§7.5.3).
      */
-    private resolveQualifiedNameFrom(startQualifiedName: string | undefined, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
+    private resolveQualifiedNameFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
         const [first, ...rest] = name.split('::');
 
         let resolvedQualifiedName: string | undefined;
-        for (const ancestorQualifiedName of this.namespaceAncestorsOf(startQualifiedName, indexes)) {
-            const candidates = this.getResolvedMembers(ancestorQualifiedName, indexes).get(first);
+        for (const ancestor of this.namespaceAncestorsOf(start, indexes)) {
+            const candidates = this.getResolvedMembers(ancestor, indexes).get(first);
             if (candidates && candidates.length > 0) {
                 resolvedQualifiedName = candidates[0].symbol.qualifiedName;
                 break;
@@ -317,23 +363,23 @@ export class NamespaceResolver {
 
         // A segment beyond the first isn't reached through the resolving
         // context's own ancestor chain (unlike the first segment, found above
-        // by construction only in scopes enclosing `startQualifiedName`), so
+        // by construction only in scopes enclosing `start`), so
         // its membership visibility must actually be checked here: "private"
         // means not visible outside the owning namespace (§7.5.2), and the
         // owning namespace here is whatever the previous segment resolved to,
-        // not necessarily anything enclosing `startQualifiedName`. A private
-        // segment is still resolvable when `startQualifiedName` is itself
+        // not necessarily anything enclosing `start`. A private
+        // segment is still resolvable when `start` is itself
         // that owning namespace or nested within it (querying your own, or an
         // ancestor's, private members from inside is not "outside").
         const isWithinStart = (namespaceQualifiedName: string): boolean =>
-            this.namespaceAncestorsOf(startQualifiedName, indexes).has(namespaceQualifiedName);
+            this.namespaceAncestorsOf(start, indexes).has(namespaceQualifiedName);
         for (const segment of rest) {
             const ownerQualifiedName: string = resolvedQualifiedName;
             const members: ResolvedMember[] | undefined = this.getResolvedMembers(ownerQualifiedName, indexes).get(segment);
             const visibleMember: ResolvedMember | undefined = members?.find(
                 (m: ResolvedMember) => m.visibility === 'public'
                     || isWithinStart(ownerQualifiedName)
-                    || (m.visibility === 'protected' && this.isProtectedVisibleFrom(startQualifiedName, ownerQualifiedName, indexes)),
+                    || (m.visibility === 'protected' && this.isProtectedVisibleFrom(start, ownerQualifiedName, indexes)),
             );
             if (!visibleMember) return undefined;
             resolvedQualifiedName = visibleMember.symbol.qualifiedName;
@@ -350,7 +396,7 @@ export class NamespaceResolver {
      * inheritance)." `ownerQualifiedName` is the namespace that owns the
      * protected membership (where the `protected import` was declared);
      * this is true when `ownerQualifiedName` is itself a definition or
-     * usage, and `startQualifiedName` (or one of its own enclosing
+     * usage, and namespace `start` (or one of its own enclosing
      * namespaces) is a specialization of it.
      *
      * Only covers a *qualified* reference reaching into a specialization's
@@ -361,12 +407,13 @@ export class NamespaceResolver {
      * otherwise model (it deliberately covers only §7.5's own namespace/
      * import mechanics), so that case isn't covered here.
      */
-    private isProtectedVisibleFrom(startQualifiedName: string | undefined, ownerQualifiedName: string, indexes: SymbolIndexes): boolean {
+    private isProtectedVisibleFrom(start: NamespaceKey, ownerQualifiedName: string, indexes: SymbolIndexes): boolean {
         const owner = indexes.byQualifiedName.get(ownerQualifiedName);
         if (!owner || !(isDefinition(owner.kind) || isUsage(owner.kind))) return false;
 
-        for (const ancestorQualifiedName of this.namespaceAncestorsOf(startQualifiedName, indexes)) {
-            if (ancestorQualifiedName && this.isSpecializationOf(ancestorQualifiedName, ownerQualifiedName, indexes)) return true;
+        for (const ancestor of this.namespaceAncestorsOf(start, indexes)) {
+            const candidate = typeof ancestor === 'string' ? indexes.byQualifiedName.get(ancestor) : ancestor;
+            if (candidate && this.isSpecializationOf(candidate, ownerQualifiedName, indexes)) return true;
         }
         return false;
     }
@@ -396,25 +443,25 @@ export class NamespaceResolver {
      * being cleared once the outermost call for it returns, so it can't
      * leak a stale answer across different `SymbolIndexes` snapshots.
      */
-    private isSpecializationOf(candidateQualifiedName: string, ownerQualifiedName: string, indexes: SymbolIndexes): boolean {
-        const reentrancyKey = `${candidateQualifiedName}\0${ownerQualifiedName}`;
-        if (this.specializationChecksInProgress.has(reentrancyKey)) return false;
-        this.specializationChecksInProgress.add(reentrancyKey);
+    private isSpecializationOf(candidate: SysMLSymbol, ownerQualifiedName: string, indexes: SymbolIndexes): boolean {
+        const ownersInProgress = this.specializationChecksInProgress.get(candidate) ?? new Set<string>();
+        if (ownersInProgress.has(ownerQualifiedName)) return false;
+        ownersInProgress.add(ownerQualifiedName);
+        this.specializationChecksInProgress.set(candidate, ownersInProgress);
         try {
-            const visited = new Set<string>([candidateQualifiedName]);
-            let frontier = [candidateQualifiedName];
+            const visited = new Set<SysMLSymbol>([candidate]);
+            let frontier = [candidate];
             let guard = 0;
             while (frontier.length > 0 && guard++ < MAX_SPECIALIZATION_CHAIN_DEPTH) {
-                const next: string[] = [];
-                for (const qualifiedName of frontier) {
-                    const symbol = indexes.byQualifiedName.get(qualifiedName);
-                    for (const typeName of symbol?.typeNames ?? []) {
-                        const supertype = this.resolveQualifiedNameFrom(symbol?.parentQualifiedName, typeName, indexes);
+                const next: SysMLSymbol[] = [];
+                for (const symbol of frontier) {
+                    for (const typeName of symbol.typeNames) {
+                        const supertype = this.resolveQualifiedNameFrom(ownerKeyOf(symbol, indexes.byElementId), typeName, indexes);
                         if (!supertype) continue;
                         if (supertype.qualifiedName === ownerQualifiedName) return true;
-                        if (!visited.has(supertype.qualifiedName)) {
-                            visited.add(supertype.qualifiedName);
-                            next.push(supertype.qualifiedName);
+                        if (!visited.has(supertype)) {
+                            visited.add(supertype);
+                            next.push(supertype);
                         }
                     }
                 }
@@ -422,21 +469,22 @@ export class NamespaceResolver {
             }
             return false;
         } finally {
-            this.specializationChecksInProgress.delete(reentrancyKey);
+            ownersInProgress.delete(ownerQualifiedName);
+            if (ownersInProgress.size === 0) this.specializationChecksInProgress.delete(candidate);
         }
     }
 
     /**
-     * Qualified names of `symbol`'s enclosing namespaces (its parent, its
-     * parent's parent, ...), plus the implicit root namespace (`''`).
+     * `symbol`'s enclosing namespaces (its parent, its parent's parent, ...),
+     * as `NamespaceKey`s, plus the implicit root namespace (`''`).
      * Members of any of these are visible from `symbol` without an import.
      */
-    namespaceAncestors(symbol: SysMLSymbol, indexes: SymbolIndexes): Set<string> {
-        return this.namespaceAncestorsOf(symbol.parentQualifiedName, indexes);
+    namespaceAncestors(symbol: SysMLSymbol, indexes: SymbolIndexes): Set<NamespaceKey> {
+        return this.namespaceAncestorsOf(ownerKeyOf(symbol, indexes.byElementId), indexes);
     }
 
     /**
-     * As `namespaceAncestors`, but starting from a qualifiedName directly rather
+     * As `namespaceAncestors`, but starting from a namespace directly rather
      * than a symbol's own parent. Iteration order matters here, not just
      * membership: `resolveQualifiedNameFrom`'s first-segment lookup walks this
      * set in order and stops at the first namespace that has a matching member,
@@ -447,34 +495,35 @@ export class NamespaceResolver {
      * root) is therefore added last, after the full innermost-to-outermost
      * climb, not seeded first.
      */
-    private namespaceAncestorsOf(startQualifiedName: string | undefined, indexes: SymbolIndexes): Set<string> {
-        const ancestors = new Set<string>();
-        let current = startQualifiedName;
+    private namespaceAncestorsOf(start: NamespaceKey, indexes: SymbolIndexes): Set<NamespaceKey> {
+        const ancestors = new Set<NamespaceKey>();
+        let current: NamespaceKey | undefined = start;
         let guard = 0;
-        while (current && guard++ < MAX_NAMESPACE_NESTING_DEPTH) {
+        while (current !== undefined && current !== '' && guard++ < MAX_NAMESPACE_NESTING_DEPTH) {
             ancestors.add(current);
-            current = indexes.byQualifiedName.get(current)?.parentQualifiedName;
+            const namespaceSymbol: SysMLSymbol | undefined = typeof current === 'string' ? indexes.byQualifiedName.get(current) : current;
+            current = namespaceSymbol ? ownerKeyOf(namespaceSymbol, indexes.byElementId) : undefined;
         }
         ancestors.add('');
         return ancestors;
     }
 
     /**
-     * The resolved member table of namespace `qualifiedName` (`''` for the
-     * implicit root): its own owned members, plus everything brought in by
+     * The resolved member table of `namespace` (a `NamespaceKey`,
+     * `''` for the implicit root): its own owned members, plus everything brought in by
      * its `import` statements — including, transitively, a further namespace's
      * own already-imported (and non-privately-imported) members, matching
      * §7.5.3's "imported memberships become members of the importing
      * namespace" and its P2/Q re-import example. Cached per `indexes`.
      */
-    getResolvedMembers(qualifiedName: string, indexes: SymbolIndexes): Map<string, ResolvedMember[]> {
+    getResolvedMembers(namespace: NamespaceKey, indexes: SymbolIndexes): Map<string, ResolvedMember[]> {
         if (!this.resolvedMembersByIndexes) this.resolvedMembersByIndexes = new WeakMap();
         let perIndexesCache = this.resolvedMembersByIndexes.get(indexes);
         if (!perIndexesCache) {
             perIndexesCache = new Map();
             this.resolvedMembersByIndexes.set(indexes, perIndexesCache);
         }
-        const cached = perIndexesCache.get(qualifiedName);
+        const cached = perIndexesCache.get(namespace);
         if (cached) return cached;
 
         const members = new Map<string, ResolvedMember[]>();
@@ -498,14 +547,14 @@ export class NamespaceResolver {
             members.set(name, list);
         };
 
-        for (const owned of indexes.byParent.get(qualifiedName) ?? []) {
+        for (const owned of indexes.byParent.get(namespace) ?? []) {
             addMember(owned.name, { symbol: owned, visibility: owned.visibility ?? 'public' });
         }
 
         // Cycle guard: seed the cache with `members` itself -- the *same live
         // object*, not a snapshot copy -- before processing imports, rather
         // than an empty table. An import target is itself resolved relative
-        // to *this* namespace (see `applyImport`'s `fromQualifiedName`),
+        // to *this* namespace (see `applyImport`'s `importingNamespace`),
         // which means resolving it can recurse back into this same
         // `getResolvedMembers` call: for a directly-owned sibling (e.g.
         // `public import Inner::X;` where `Inner` is a package declared
@@ -527,9 +576,9 @@ export class NamespaceResolver {
         // recursing forever; owned members are computed with no recursion at
         // all, so exposing them (and each import's incremental contribution)
         // here doesn't reopen that.
-        perIndexesCache.set(qualifiedName, members);
+        perIndexesCache.set(namespace, members);
 
-        const owner = indexes.byQualifiedName.get(qualifiedName);
+        const owner = typeof namespace === 'string' ? indexes.byQualifiedName.get(namespace) : namespace;
         const importTargets = owner?.importTargets ?? [];
         // §7.5.4: a package-level `filter` applies to every import of that package,
         // combined (AND) with any filter on the specific import itself.
@@ -541,7 +590,7 @@ export class NamespaceResolver {
                     if (evaluateFilter(effectiveFilter, entry.symbol)) addMember(name, entry);
                 }
                 : addMember;
-            this.applyImport(imp, qualifiedName, indexes, filteredAddMember);
+            this.applyImport(imp, namespace, indexes, filteredAddMember);
         }
 
         return members;
@@ -552,7 +601,7 @@ export class NamespaceResolver {
      * membership vs. namespace / shallow vs. `::**` deep distinctions in
      * ImportTarget (§7.5.3, including the P4/P5/P6 recursive-import example).
      *
-     * `imp.target` is resolved relative to `fromQualifiedName` (the importing
+     * `imp.target` is resolved relative to `importingNamespace` (the importing
      * namespace itself, per §7.5.1's generic name-resolution rule: begin in the
      * namespace containing the reference, then walk outward through its
      * enclosing namespaces), not as an absolute/global name. This covers both:
@@ -566,18 +615,18 @@ export class NamespaceResolver {
      */
     private applyImport(
         imp: ImportTarget,
-        fromQualifiedName: string,
+        importingNamespace: NamespaceKey,
         indexes: SymbolIndexes,
         addMember: (name: string, entry: ResolvedMember) => void,
     ): void {
         switch (imp.kind) {
             case 'membership': {
-                const target = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
+                const target = this.resolveQualifiedNameFrom(importingNamespace, imp.target, indexes);
                 if (target) addMember(target.name, { symbol: target, visibility: imp.visibility });
                 break;
             }
             case 'membership-deep': {
-                const target = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
+                const target = this.resolveQualifiedNameFrom(importingNamespace, imp.target, indexes);
                 if (target) {
                     addMember(target.name, { symbol: target, visibility: imp.visibility });
                     this.importVisibleMembers(target.qualifiedName, imp.visibility, indexes, addMember, true);
@@ -585,12 +634,12 @@ export class NamespaceResolver {
                 break;
             }
             case 'namespace-shallow': {
-                const owner = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
+                const owner = this.resolveQualifiedNameFrom(importingNamespace, imp.target, indexes);
                 if (owner) this.importVisibleMembers(owner.qualifiedName, imp.visibility, indexes, addMember, false);
                 break;
             }
             case 'namespace-deep': {
-                const owner = this.resolveQualifiedNameFrom(fromQualifiedName, imp.target, indexes);
+                const owner = this.resolveQualifiedNameFrom(importingNamespace, imp.target, indexes);
                 if (owner) this.importVisibleMembers(owner.qualifiedName, imp.visibility, indexes, addMember, true);
                 break;
             }

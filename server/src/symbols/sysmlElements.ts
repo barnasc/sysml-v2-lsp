@@ -70,6 +70,20 @@ export enum SysMLElementKind {
 export interface SysMLSymbol {
     /** The symbol's name */
     name: string;
+    /**
+     * True for an anonymous element (KerML: no `declaredName`): its `name` is generated for
+     * display (`a.p-b.q`, `<transition s1 to s2>`), and its `qualifiedName` has the declaration
+     * site appended (`Demo::a.p-b.q#file:///a.sysml:12:5`), the namespace path of its own
+     * members. It declares no member name, so it is never found by name lookup, never takes part
+     * in duplicate-name checks, and is identified by its `elementId`, not its `qualifiedName`.
+     */
+    isAnonymous?: boolean;
+    /**
+     * Unique identifier, independent of any name (KerML `Element::elementId`). For now set only
+     * on an anonymous element, which is indexed by it instead of by `qualifiedName`: a quoted
+     * declared name can spell out any qualified name, but never take over an elementId.
+     */
+    elementId?: string;
     /** Declared `<shortName>` alias (`identification: LT name GT name | LT name GT`), if any. */
     shortName?: string;
     /** The kind of SysML element */
@@ -102,6 +116,8 @@ export interface SysMLSymbol {
     controlFlows?: { source: string; target: string; guard?: string }[];
     /** Parent symbol's qualified name */
     parentQualifiedName?: string;
+    /** Parent's `elementId`, set when the parent is anonymous */
+    parentElementId?: string;
     /** Child symbol qualified names */
     children: string[];
     /** Multiplicity as a string (e.g., "1", "0..*", "2..5") */
