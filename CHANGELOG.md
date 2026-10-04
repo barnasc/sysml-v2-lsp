@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.34.0]
+
 ### Added
 
 - Add `.github/copilot-instructions.md` requiring language-affecting changes to be validated against the latest OMG SysML and KerML specifications, with cited clauses or grammar productions and a regression test.
