@@ -18,10 +18,23 @@
 - Validate parse, throughput, and symbol-table correctness with stale-DFA recovery, isolate parser DFA state between suites, point provider probes at real type references, and batch cached provider measurements. Earlier benchmark results are not comparable and should be discarded; the baseline has been regenerated.
 - Make the benchmark TypeScript project independently type-checkable and document each suite's measurement boundary and limitations.
 - Pin `tsx` as a dev dependency and consolidate benchmark scripts to `bench`, `bench:compare`, and `bench:history`; use `npm run bench -- --suite <name>`, `--baseline`, or `--compare` in place of the removed `bench:parse`, `bench:providers`, `bench:baseline`, and `bench:regression` aliases.
+- Every declared element (package, definition or usage) has a `symbolId`: a version 5 UUID derived from the project ID and its name, or, without one, its declaration (KerML 9.1). Not the KerML `elementId`: a rename gives a new one.
+- A `symbolId` is stable across reloads while the set of declarations is unchanged: when another document adds or removes a declaration with the same qualified name, the declarations are renumbered by document and position, and the `symbolId`s after it change (a package keeps its own).
+- `sysml/model` elements report a `displayName`: the text to show, as in the outline: the name, or for an anonymous element its declaration without a name (`: Engine`) or what it connects (`a.p→b.p`). MCP symbols report it too, and an anonymous element's `declaration` as written.
+- Every declared element links to its owner by `SysMLSymbol.parentId` (the owner's `symbolId`); `SysMLSymbol.parentQualifiedName` is removed, and `SysMLSymbol.qualifiedName` is optional (absent for an anonymous element and its members).
+- Add `initializationOptions.projectId` (MCP server: `SYSML_PROJECT_ID`): a project's UUID, making its top-level elements' URLs `urn:uuid:<projectId>/<name>`, so symbol IDs are unique across projects (KerML 9.1). Without it, symbol IDs are unique only within one workspace.
+- `sysml/model`, element lookup, the complexity report and MCP symbols report `symbolId`, and `qualifiedName: null` where an element has none (as in the SysML v2 API); relationships report `sourceId` or `symbolId`. Breaking for MCP: symbols report `parentId` (the owner's `symbolId`) instead of `parent`.
 
 ### Fixed
 
 - Sequence diagrams no longer show `succession flow` usages as messages (#122).
+- A definition or usage without a declared name (`part : P;`, `port :> p0;`, `connect a.p to b.p;`, `decide;`) is anonymous: it has no name or qualified name, instead of one taken from its type, a subsetted feature or its first end. A redefinition or `perform`/`exhibit`/`include` keeps the referenced name (7.6.5).
+- Anonymous elements are shown by their declaration without a name, as in the standard's graphical notation (`: Engine`, `:> p0`), else by what they connect (`a.p→b.p`, `s1→s2`), in the outline, workspace symbols, hierarchies, messages and MCP previews. `sysml/model` reports an empty `name` and `isAnonymous: true`.
+- An anonymous element is selected by its first token (`connect`): hover, go to definition and rename on `a` in `connect a.p to b.p;` now apply to `a`, not to the connection. Rename, find references and linked editing do nothing on an anonymous element, which has no name.
+- `sysml/model` reports the `if ... then`/`else` statements following a decision node as its branches, for a named decision too. Diagnostics no longer report an anonymous requirement as unsatisfied or unverified, or anonymous definitions as duplicates.
+- MCP preview diagrams give each anonymous element its own node, identified by its `symbolId`, so anonymous parts of one type no longer share a sequence lifeline; named participants are identified by qualified name, as in the other views. An anonymous actor is labelled by its type (`: User`).
+- A typed transition without a source state (`transition : T then s2;`) is an anonymous element like any other, owned by and listed among the members of its owner.
+- Report an empty quoted name (`''`) as an error (`empty-name`): SysML v2 requires a name in single quotes to contain at least one character (7.2.2). An element declared with it is treated as anonymous.
 
 ## [0.32.0]
 

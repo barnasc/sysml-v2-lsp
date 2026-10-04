@@ -222,6 +222,115 @@ package Test {
             expect(port!.attributes['portType']).toBe('PowerPort');
         });
 
+        it('should report each symbol\'s ID, and it as the source of its relationships', async () => {
+            const model = await getModelForText(`
+package Test {
+    part def Engine;
+    part def Vehicle {
+        part engine : Engine;
+    }
+}
+`, ['elements', 'relationships']);
+
+            const pkg = model.elements!.find(e => e.name === 'Test')!;
+            const vehicle = pkg.children.find(e => e.name === 'Vehicle')!;
+            const engine = vehicle.children.find(e => e.name === 'engine')!;
+            const ids = [pkg, vehicle, engine].map(e => e.symbolId);
+            expect(ids.every(id => /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id))).toBe(true);
+            expect(new Set(ids).size).toBe(3);
+            expect(engine.relationships).toEqual([{ type: 'typing', source: 'engine', sourceId: engine.symbolId, target: 'Engine' }]);
+            expect(model.relationships).toContainEqual({ type: 'typing', source: 'engine', sourceId: engine.symbolId, target: 'Engine' });
+        });
+
+        it('should report each element\'s displayName: its name, or for an anonymous one the text the outline shows', async () => {
+            const model = await getModelForText(`
+package Demo {
+    part def Engine;
+    part a { port p; }
+    part b { port p; }
+    part car { part : Engine; }
+    connect a.p to b.p { attribute flowRate; }
+}
+`, ['elements']);
+
+            const labels: string[][] = [];
+            const visit = (elements: any[]) => elements.forEach(element => {
+                labels.push([element.name, element.displayName]);
+                visit(element.children ?? []);
+            });
+            visit(model.elements ?? []);
+            expect(labels).toEqual([
+                ['Demo', 'Demo'],
+                ['Engine', 'Engine'],
+                ['a', 'a'],
+                ['p', 'p'],
+                ['b', 'b'],
+                ['p', 'p'],
+                ['car', 'car'],
+                ['', ': Engine'],
+                ['', 'a.p→b.p'],
+                ['flowRate', 'flowRate'],
+            ]);
+        });
+
+        it('should report the symbol ID of the allocation, named or anonymous, its allocation relationship is', async () => {
+            const model = await getModelForText(`
+package Demo {
+    allocation def Alloc;
+    allocation a1 : Alloc { end l; end p; }
+    allocation : Alloc { end p; end l; }
+}
+`, ['elements', 'relationships']);
+
+            const [named, anonymous] = model.elements!.find(e => e.name === 'Demo')!.children.filter(e => e.type === 'allocation');
+            expect(model.relationships!.filter(r => r.type === 'allocation')).toEqual([
+                { type: 'allocation', source: 'l', target: 'p', name: 'a1', symbolId: named.symbolId },
+                { type: 'allocation', source: 'p', target: 'l', name: '', symbolId: anonymous.symbolId },
+            ]);
+        });
+
+        it('should report the satisfying or verifying symbol\'s ID, but none for a `by` name', async () => {
+            const model = await getModelForText(`
+package Demo {
+    requirement def R;
+    requirement r : R;
+    part sys {
+        satisfy r;
+        verify r;
+    }
+    verify requirement r by sys;
+}
+`, ['elements', 'relationships']);
+
+            const sys = model.elements!.find(e => e.name === 'Demo')!.children.find(e => e.name === 'sys')!;
+            const rels = model.relationships!.filter(r => r.type === 'satisfy' || r.type === 'verify');
+            expect(rels).toContainEqual({ type: 'satisfy', source: 'sys', sourceId: sys.symbolId, target: 'r' });
+            expect(rels).toContainEqual({ type: 'verify', source: 'sys', sourceId: sys.symbolId, target: 'r' });
+            // `by sys` gives the source as written: a name, without a symbol ID.
+            expect(rels.filter(r => r.type === 'verify' && r.source === 'sys' && r.sourceId === undefined)).toHaveLength(1);
+        });
+
+        it('should report the workspace\'s symbol IDs, distinct for declarations clashing across documents', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+            const docManager = new DocumentManager();
+            for (const uri of ['test://a.sysml', 'test://b.sysml']) {
+                docManager.parse(TextDocument.create(uri, 'sysml', 1, 'package Demo { part def P { attribute w; } }'));
+            }
+            const provider = new SysMLModelProvider(docManager);
+            const idsIn = (uri: string) => {
+                const p = provider.getModel(uri, 1, ['elements']).elements![0].children[0];
+                return [p.symbolId, p.children[0].symbolId];
+            };
+            const workspace = docManager.getWorkspaceSymbolTable();
+            for (const uri of ['test://a.sysml', 'test://b.sysml']) {
+                const declared = workspace.getSymbolsForUri(uri);
+                expect(idsIn(uri)).toEqual([declared.find(s => s.name === 'P')!.symbolId, declared.find(s => s.name === 'w')!.symbolId]);
+            }
+            expect(new Set([...idsIn('test://a.sysml'), ...idsIn('test://b.sysml')]).size).toBe(4);
+        });
+
         it('should use correct type strings matching extension expectations', async () => {
             const model = await getModelForText(`
 package Test {
@@ -397,13 +506,15 @@ package Demo {
         transition aToB first a accept Tick then b;
     }
 }
-`, ['relationships']);
+`, ['elements', 'relationships']);
 
+            const transition = model.elements![0].children[0].children.find(e => e.name === 'aToB')!;
             expect(model.relationships).toContainEqual({
                 type: 'transition',
                 source: 'a',
                 target: 'b',
                 name: 'Tick',
+                symbolId: transition.symbolId,
             });
         });
 
@@ -677,18 +788,9 @@ package Test {
     }
 }
 `;
-            const findInterface = (els: any[]): any => {
-                for (const el of els) {
-                    if (el.type === 'interface') return el;
-                    const found = findInterface(el.children ?? []);
-                    if (found) return found;
-                }
-            };
-            const { start } = findInterface((await getModelForText(base, ['elements'])).elements ?? []).range;
-            const segment = `a.p-b.p#test://model-test.sysml:${start.line + 1}:${start.character + 1}`;
-
-            // A declared part quoted like the interface's qualified name, with a member of its own.
-            const model = await getModelForText(base.replace('\n}\n', `\n    part '${segment}' { part inner; }\n}\n`), ['sequenceDiagrams']);
+            // A declared part quoted like the anonymous interface's declaration, with a member of its own.
+            const declaration = 'interface a.p to b.p';
+            const model = await getModelForText(base.replace('\n}\n', `\n    part '${declaration}' { part inner; }\n}\n`), ['sequenceDiagrams']);
             const diagram = model.sequenceDiagrams!.find(d => d.messages.some(m => m.name === 'm'))!;
             expect(diagram.participants.map(p => p.name).sort()).toEqual(['x', 'y']);
         });
@@ -1011,17 +1113,16 @@ package Demo {
                 return found;
             };
             expect(interfacesNamed('source')).toEqual([]);
-            expect(interfacesNamed('source.p1-target.p1')).toHaveLength(1);
-            expect(interfacesNamed('source.p2-target.p2')).toHaveLength(1);
             expect(interfacesNamed('link')).toHaveLength(1);
-            // Anonymity is reported as an element attribute; a declared name has none.
-            const [anonymous] = interfacesNamed('source.p1-target.p1') as any[];
+            // The two anonymous interfaces have no name, and are modeled under `link`, flagged as anonymous.
             const [declared] = interfacesNamed('link') as any[];
-            expect(anonymous.attributes.isAnonymous).toBe(true);
+            const nested = declared.children.filter((c: any) => c.type === 'interface');
+            expect(nested.map((c: any) => [c.name, c.attributes.isAnonymous])).toEqual([['', true], ['', true]]);
+            expect(new Set(nested.map((c: any) => c.symbolId)).size).toBe(2);
             expect(declared.attributes.isAnonymous).toBeUndefined();
         });
 
-        it('should report declared duplicates across documents, but keep and not report anonymous elements sharing a synthesized name', async () => {
+        it('should report declared duplicates across documents, but keep and not report anonymous elements with the same ends', async () => {
             const fileA = `
 package Demo {
     port def P { port p1; }
@@ -1052,21 +1153,22 @@ package Demo {
             const ambiguous = model.diagnostics!.filter(d => d.code === 'ambiguous-namespace-name');
             expect(ambiguous.map(d => d.elementName)).toEqual(['link']);
             // This document's own anonymous interface and connection are still modeled.
-            const names: string[] = [];
-            const walk = (els: { type: string; name: string; children?: unknown[] }[]) =>
-                els.forEach(el => { if (el.type === 'interface' || el.type === 'connection') names.push(el.name); walk((el.children ?? []) as typeof els); });
+            const connectors: { type: string; name: string; attributes: Record<string, unknown> }[] = [];
+            const walk = (els: { type: string; name: string; attributes: Record<string, unknown>; children?: unknown[] }[]) =>
+                els.forEach(el => { if (el.type === 'interface' || el.type === 'connection') connectors.push(el); walk((el.children ?? []) as typeof els); });
             walk(model.elements ?? []);
-            expect(names.filter(n => n === 'a.pa-b.pb')).toHaveLength(2); // this document's interface and connection
-            expect(names).toContain('link');
+            const anonymous = connectors.filter(c => c.attributes.isAnonymous);
+            expect(anonymous.map(c => [c.type, c.name])).toEqual([['interface', ''], ['connection', '']]);
+            expect(connectors.map(c => c.name)).toContain('link');
         });
 
-        it('should model a declared connection quoted like an anonymous one\'s name, and anonymous duplicates, each as its own element', async () => {
+        it('should model a declared connection quoted like an anonymous one\'s declaration, and anonymous duplicates, each as its own element', async () => {
             const model = await getModelForText(`
 package Demo {
     part a { port p; }
     part b { port p; }
     connect a.p to b.p;
-    connection 'a.p-b.p';
+    connection 'connect a.p to b.p';
     connect a.p to b.p;
 }
 `, ['elements', 'diagnostics']);
@@ -1075,15 +1177,42 @@ package Demo {
             const connections: any[] = [];
             const walk = (els: any[]) => els.forEach(el => { if (el.type === 'connection') connections.push(el); walk(el.children ?? []); });
             walk(model.elements ?? []);
-            // All three keep the label as their name; only the anonymous ones are flagged.
+            // Only the declared one has a name; the anonymous ones are flagged, and each is its own element.
             expect(connections.map(c => [c.name, c.attributes.isAnonymous])).toEqual([
-                ['a.p-b.p', true],
-                ['a.p-b.p', undefined],
-                ['a.p-b.p', true],
+                ['', true],
+                ['connect a.p to b.p', undefined],
+                ['', true],
             ]);
+            expect(new Set(connections.map(c => c.symbolId)).size).toBe(3);
         });
 
-        it('should keep an anonymous interface\'s members apart from a declared part quoted like its qualified name', async () => {
+        it('should model declared elements quoted like an anonymous connection\'s display name, or its former generated name, each as its own element', async () => {
+            const model = await getModelForText(`
+package Demo {
+    part a { port p; }
+    part b { port p; }
+    connect a.p to b.p { attribute w; }
+    connection 'a.p→b.p' { attribute w; }
+    connection 'a.p-b.p' { attribute w; }
+}
+`, ['elements', 'diagnostics']);
+
+            expect(model.diagnostics!.filter(d => d.code === 'ambiguous-namespace-name' || d.code === 'duplicate-definition')).toEqual([]);
+            const demo = model.elements!.find(e => e.name === 'Demo')!;
+            const elements = demo.children.filter(e => e.name !== 'a' && e.name !== 'b');
+            // The anonymous connection is shown as `a.p→b.p`, but only the declared elements have a name.
+            expect(elements.map(e => [e.type, e.name, e.attributes.isAnonymous])).toEqual([
+                ['connection', '', true],
+                ['connection', 'a.p→b.p', undefined],
+                ['connection', 'a.p-b.p', undefined],
+            ]);
+            expect(new Set(elements.map(e => e.symbolId)).size).toBe(3);
+            // Each has its own member `w`.
+            const members = elements.map(e => e.children.find(c => c.name === 'w')!.symbolId);
+            expect(new Set(members).size).toBe(3);
+        });
+
+        it('should keep an anonymous interface\'s members apart from a declared part quoted like its declaration', async () => {
             const base = `package Demo {
     part a { port p; }
     part b { port p; }
@@ -1094,20 +1223,19 @@ package Demo {
                 els.forEach(el => { if (pred(el)) out.push(el); findAll(el.children ?? [], pred, out); });
                 return out;
             };
-            // The anonymous interface's qualified name segment: its label, then its elementId (declaration site).
-            const [baseInterface] = findAll((await getModelForText(base, ['elements'])).elements ?? [], el => el.type === 'interface');
-            const segment = `a.p-b.p#test://model-test.sysml:${baseInterface.range.start.line + 1}:${baseInterface.range.start.character + 1}`;
+            // The anonymous interface has no name; only its declaration as written.
+            const declaration = 'interface a.p to b.p';
 
-            const model = await getModelForText(base.replace('\n}\n', `\n    part '${segment}' { part inner; }\n}\n`), ['elements']);
+            const model = await getModelForText(base.replace('\n}\n', `\n    part '${declaration}' { part inner; }\n}\n`), ['elements']);
             const [anonymous] = findAll(model.elements ?? [], el => el.type === 'interface');
-            const [declared] = findAll(model.elements ?? [], el => el.type === 'part' && el.name === segment);
+            const [declared] = findAll(model.elements ?? [], el => el.type === 'part' && el.name === declaration);
             expect(anonymous.attributes.isAnonymous).toBe(true);
             expect(declared).toBeDefined();
             expect(anonymous.children.map((c: { name: string }) => c.name)).toEqual(['w']);
             expect(declared.children.map((c: { name: string }) => c.name)).toEqual(['inner']);
         });
 
-        it('should resolve names in an anonymous interface\'s own namespace, not in a declared part quoted like its qualified name', async () => {
+        it('should resolve names in an anonymous interface\'s own namespace, not in a declared part quoted like its declaration', async () => {
             const base = `package Demo {
     part a { port p; }
     part b { port p; }
@@ -1116,18 +1244,9 @@ package Demo {
 `;
             const baseModel = await getModelForText(base, ['elements', 'diagnostics']);
             expect(baseModel.diagnostics).toEqual([]);
-            const findInterface = (els: any[]): any => {
-                for (const el of els) {
-                    if (el.type === 'interface') return el;
-                    const found = findInterface(el.children ?? []);
-                    if (found) return found;
-                }
-            };
-            const { start } = findInterface(baseModel.elements ?? []).range;
-            const segment = `a.p-b.p#test://model-test.sysml:${start.line + 1}:${start.character + 1}`;
-
-            // `W` is a member of the anonymous interface only: `inner` can't see it.
-            const model = await getModelForText(base.replace('\n}\n', `\n    part '${segment}' { part inner : W; }\n}\n`), ['diagnostics']);
+            // `W` is a member of the anonymous interface only: `inner`, in a part quoted like its declaration, can't see it.
+            const declaration = 'interface a.p to b.p';
+            const model = await getModelForText(base.replace('\n}\n', `\n    part '${declaration}' { part inner : W; }\n}\n`), ['diagnostics']);
             expect(model.diagnostics!.map(d => [d.code, d.elementName])).toEqual([['unresolved-type', 'inner']]);
         });
 
@@ -1560,7 +1679,7 @@ package Test {
                 flow.relationships.find((rel: any) => rel.type === 'flow'),
             ])).toEqual([
                 [
-                    '<flow source.output to target.input>',
+                    '',
                     'Payload',
                     'source.output',
                     'target.input',
@@ -1569,6 +1688,7 @@ package Test {
                         source: 'source.output',
                         target: 'target.input',
                         name: 'Payload',
+                        symbolId: flows[0].symbolId,
                     },
                 ],
                 [
@@ -1581,6 +1701,7 @@ package Test {
                         source: 'source.other',
                         target: 'target.other',
                         name: 'OtherPayload',
+                        symbolId: flows[1].symbolId,
                     },
                 ],
             ]);
@@ -1590,12 +1711,14 @@ package Test {
                     source: 'source.output',
                     target: 'target.input',
                     name: 'Payload',
+                    symbolId: flows[0].symbolId,
                 },
                 {
                     type: 'flow',
                     source: 'source.other',
                     target: 'target.other',
                     name: 'OtherPayload',
+                    symbolId: flows[1].symbolId,
                 },
             ]);
             expect(model.sequenceDiagrams).toHaveLength(1);
@@ -1636,6 +1759,7 @@ package Test {
             expect(flow!.relationships).toContainEqual({
                 type: 'typing',
                 source: 'f',
+                sourceId: flow!.symbolId,
                 target: 'F',
             });
             expect(flow!.relationships).toContainEqual({
@@ -1643,6 +1767,7 @@ package Test {
                 source: 'source.output',
                 target: 'target.input',
                 name: 'I',
+                symbolId: flow!.symbolId,
             });
 
             const succession = elements.find(element => element.type === 'succession flow');
@@ -1651,11 +1776,13 @@ package Test {
                 type: 'succession',
                 source: 'producer.output',
                 target: 'consumer.input',
+                symbolId: succession!.symbolId,
             });
             expect(model.relationships).toContainEqual({
                 type: 'succession',
                 source: 'producer.output',
                 target: 'consumer.input',
+                symbolId: succession!.symbolId,
             });
         });
 
@@ -1747,6 +1874,29 @@ package Test {
                     expect(decision.branches.length).toBeGreaterThan(0);
                 }
             }
+        });
+
+        it.each(['decide;', 'decide d;'])('should extract the branches following a decision node (%s), once', async (decide) => {
+            const model = await getModelForText(`
+package Test {
+    action def TrafficControl {
+        action check;
+        action go;
+        action stop;
+        first check;
+        ${decide}
+        if check then go;
+        else stop;
+        action after;
+    }
+}
+`, ['activityDiagrams']);
+            const diagram = model.activityDiagrams!.find(d => d.name === 'TrafficControl')!;
+            expect(diagram.decisions).toHaveLength(1);
+            expect(diagram.decisions[0].branches).toEqual([
+                { condition: 'check', target: 'go' },
+                { condition: 'else', target: 'stop' },
+            ]);
         });
 
         it('should extract explicit succession keyword', async () => {

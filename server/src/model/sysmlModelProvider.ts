@@ -12,12 +12,14 @@ import { analyseComplexity } from '../analysis/complexityAnalyzer.js';
 import { DocumentManager } from '../documentManager.js';
 import { getLibraryPackageNames } from '../library/libraryIndex.js';
 import { ParseResult } from '../parser/parseDocument.js';
-import { NamespaceKey, NamespaceResolver, buildSymbolIndexes, describeConflictingDeclarations, findConflictedQualifiedNames, namespaceKeyOf, otherDeclarations, ownerKeyOf } from '../symbols/namespaceResolver.js';
+import { NamespaceKey, NamespaceResolver, buildSymbolIndexes, describeConflictingDeclarations, findConflictingDeclarations, namespaceKeyOf, otherDeclarations, ownerKeyOf } from '../symbols/namespaceResolver.js';
 import { SymbolTable } from '../symbols/symbolTable.js';
 import {
     SysMLElementKind,
     SysMLSymbol,
     isDefinition,
+    displayName,
+    isAnonymous,
     isFlowUsage,
     isUsage,
     toMetaclassName,
@@ -185,9 +187,9 @@ function readCommaSeparatedIdents(text: string, pos: number): string[] {
     return names;
 }
 
-/** The anonymous symbols (`SysMLSymbol.isAnonymous`) among `symbols`, by `elementId`. */
-function anonymousSymbolsById(symbols: SysMLSymbol[]): Map<string, SysMLSymbol> {
-    return new Map(symbols.filter(s => s.isAnonymous).map(s => [s.elementId!, s]));
+/** `symbols` by `symbolId`. */
+function symbolsById(symbols: SysMLSymbol[]): Map<string, SysMLSymbol> {
+    return new Map(symbols.map(s => [s.symbolId, s]));
 }
 
 /**
@@ -248,6 +250,24 @@ export class SysMLModelProvider {
     }
 
     /**
+     * Give this document's symbols the symbol IDs of the workspace symbol table.
+     * A symbol ID can depend on other documents (a clash, or identical anonymous
+     * elements in a package declared in several), which this document's own
+     * table doesn't see. Both tables come from the same parse, so each
+     * declaration is matched by its kind and position.
+     */
+    private useWorkspaceIds(symbolTable: SymbolTable, uri: string): void {
+        const siteOf = (s: SysMLSymbol) => `${s.kind}@${s.range.start.line}:${s.range.start.character}`;
+        const workspace = new Map(this.documentManager.getWorkspaceSymbolTable().getSymbolsForUri(uri).map(s => [siteOf(s), s]));
+        for (const symbol of symbolTable.getSymbolsForUri(uri)) {
+            const declaration = workspace.get(siteOf(symbol));
+            if (!declaration) continue;
+            symbol.symbolId = declaration.symbolId;
+            symbol.parentId = declaration.parentId;
+        }
+    }
+
+    /**
      * Build the model response for a document.
      *
      * @param uri       Document URI
@@ -269,6 +289,7 @@ export class SysMLModelProvider {
 
         // Build (or retrieve cached) symbol table from parse result
         const symbolTable = this._getSymbolTable(uri, parseResult);
+        this.useWorkspaceIds(symbolTable, uri);
 
         const text = this.documentManager.getText(uri) ?? '';
         const lines = text.split('\n');
@@ -335,7 +356,7 @@ export class SysMLModelProvider {
     /**
      * Convert the symbol table into a recursive element tree.
      *
-     * The symbol table stores a flat list with `parentQualifiedName` pointers.
+     * The symbol table stores a flat list with `parentId` pointers.
      * We rebuild the tree by grouping symbols by parent and recursively
      * attaching children.
      */
@@ -346,14 +367,14 @@ export class SysMLModelProvider {
     ): SysMLElementDTO[] {
         const symbols = symbolTable.getSymbolsForUri(uri);
 
-        const anonymousById = anonymousSymbolsById(symbols);
-        const declaredQualifiedNames = new Set(symbols.filter(s => !s.isAnonymous).map(s => s.qualifiedName));
+        const byId = symbolsById(symbols);
+        const declaredQualifiedNames = new Set(symbols.flatMap(s => s.qualifiedName !== undefined ? [s.qualifiedName] : []));
 
         // Build parent → children index, keyed by each symbol's owning namespace
         const childrenOf = new Map<NamespaceKey, SysMLSymbol[]>();
         const roots: SysMLSymbol[] = [];
         for (const sym of symbols) {
-            const ownerKey = ownerKeyOf(sym, anonymousById);
+            const ownerKey = ownerKeyOf(sym, byId);
             if (typeof ownerKey === 'string' && !declaredQualifiedNames.has(ownerKey)) {
                 // No parent, or a parent not in this URI
                 roots.push(sym);
@@ -379,7 +400,7 @@ export class SysMLModelProvider {
         // Build children recursively from the parent→children index
         const childSymbols = (childrenOf.get(namespaceKeyOf(symbol)) ?? [])
             // B1: Filter phantom self-referencing package children
-            .filter(c => c.qualifiedName !== symbol.qualifiedName);
+            .filter(c => c.symbolId !== symbol.symbolId);
         const children: SysMLElementDTO[] = childSymbols.map(c =>
             this.symbolToElementDTO(c, childrenOf, lines),
         );
@@ -414,8 +435,8 @@ export class SysMLModelProvider {
             attributes['documentation'] = symbol.documentation;
         }
 
-        // `SysMLSymbol.isAnonymous`: `name` was synthesized, not declared.
-        if (symbol.isAnonymous) {
+        // An anonymous element (`isAnonymous`): no name; clients show its `displayName`.
+        if (isAnonymous(symbol)) {
             attributes['isAnonymous'] = true;
         }
 
@@ -476,6 +497,7 @@ export class SysMLModelProvider {
             relationships.push({
                 type: 'typing',
                 source: symbol.name,
+                sourceId: symbol.symbolId,
                 target: tn,
             });
         }
@@ -488,6 +510,7 @@ export class SysMLModelProvider {
             relationships.push({
                 type: 'specializes',
                 source: symbol.name,
+                sourceId: symbol.symbolId,
                 target: spec,
             });
         }
@@ -495,6 +518,8 @@ export class SysMLModelProvider {
         return {
             type: symbol.kind as string,
             name: symbol.name,
+            displayName: displayName(symbol),
+            symbolId: symbol.symbolId,
             range: this.rangeToDTO(symbol.range),
             children,
             attributes,
@@ -510,6 +535,7 @@ export class SysMLModelProvider {
                 type: 'succession',
                 source: details.source,
                 target: details.target,
+                symbolId: symbol.symbolId,
             };
         }
         return {
@@ -517,6 +543,7 @@ export class SysMLModelProvider {
             source: details.source,
             target: details.target,
             name: details.itemType ?? symbol.name,
+            symbolId: symbol.symbolId,
         };
     }
 
@@ -554,6 +581,7 @@ export class SysMLModelProvider {
                     relationships.push({
                         type: 'typing',
                         source: symbol.name,
+                        sourceId: symbol.symbolId,
                         target: tn,
                     });
                 }
@@ -565,6 +593,7 @@ export class SysMLModelProvider {
                 relationships.push({
                     type: 'specializes',
                     source: symbol.name,
+                    sourceId: symbol.symbolId,
                     target: spec,
                 });
             }
@@ -578,6 +607,7 @@ export class SysMLModelProvider {
                         source: connectionTargets[0],
                         target: connectionTargets[1],
                         name: symbol.name,
+                        symbolId: symbol.symbolId,
                     });
                 }
             }
@@ -596,6 +626,7 @@ export class SysMLModelProvider {
                     source: symbol.source,
                     target: symbol.target,
                     name: symbol.transitionTrigger,
+                    symbolId: symbol.symbolId,
                 });
             }
 
@@ -608,13 +639,14 @@ export class SysMLModelProvider {
                         source: allocTargets[0],
                         target: allocTargets[1],
                         name: symbol.name,
+                        symbolId: symbol.symbolId,
                     });
                 }
             }
 
             // Scan for relationship keywords in the element text
             const elementText = this.getElementText(symbol, lines);
-            const additionalRels = this.extractKeywordRelationships(symbol.name, elementText);
+            const additionalRels = this.extractKeywordRelationships(symbol, elementText);
             relationships.push(...additionalRels);
         }
 
@@ -778,7 +810,7 @@ export class SysMLModelProvider {
                 // Only mark as fully handled if it has real messages;
                 // items-only diagrams (0 messages) can be enriched by D3 synthesis
                 if (messages.length > 0) {
-                    seen.add(symbol.qualifiedName);
+                    seen.add(symbol.symbolId);
                 }
             }
         }
@@ -787,7 +819,7 @@ export class SysMLModelProvider {
         // For action defs with first/then flows, synthesise a sequence diagram
         // using action children as participants and flow edges as messages.
         for (const symbol of symbols) {
-            if (seen.has(symbol.qualifiedName)) continue;
+            if (seen.has(symbol.symbolId)) continue;
             if (symbol.kind !== SysMLElementKind.ActionDef &&
                 symbol.kind !== SysMLElementKind.ActionUsage) {
                 continue;
@@ -877,7 +909,7 @@ export class SysMLModelProvider {
         };
 
         for (const symbol of symbols) {
-            if (seen.has(symbol.qualifiedName)) continue;
+            if (seen.has(symbol.symbolId)) continue;
             if (!containerKinds.has(symbol.kind)) continue;
 
             const children = this.getChildSymbols(symbol, symbolTable);
@@ -892,7 +924,7 @@ export class SysMLModelProvider {
                 const details = child.flowDetails;
                 if (!details?.source || !details.target) continue;
                 parsedMessages.push({
-                    name: child.isAnonymous && details.itemType ? details.itemType : child.name,
+                    name: isAnonymous(child) && details.itemType ? details.itemType : child.name,
                     from: rootName(details.source),
                     to: rootName(details.target),
                     payload: details.itemType ?? (details.payloadDeclared ? '' : child.name),
@@ -977,7 +1009,7 @@ export class SysMLModelProvider {
                 messages: parsedMessages,
                 range: this.rangeToDTO(symbol.range),
             });
-            seen.add(symbol.qualifiedName);
+            seen.add(symbol.symbolId);
         }
 
         return diagrams;
@@ -1029,6 +1061,9 @@ export class SysMLModelProvider {
                 const childText = this.getElementText(child, lines);
 
                 const controlType = CONTROL_NODE_TYPE.get(child.kind);
+                // An unnamed control node (`decide;`) is taken from the action's text below
+                // (D1), under the name its flows refer to (`decide`).
+                if (controlType !== undefined && !child.name) continue;
                 if (child.kind === SysMLElementKind.ActionUsage ||
                     child.kind === SysMLElementKind.ActionDef ||
                     controlType !== undefined) {
@@ -1125,6 +1160,12 @@ export class SysMLModelProvider {
                         branches.push({ condition, target });
                     }
                 }
+                // Pattern: else <target>, as for a named decision (`extractDecisionBranches`)
+                const [elseHit] = findWordPositions(fullText, 'else');
+                if (elseHit) {
+                    const [target] = readWordAfterKeyword(fullText, elseHit.afterPos);
+                    if (target) branches.push({ condition: 'else', target });
+                }
                 if (branches.length > 0) {
                     decisions.push({
                         name: 'decide',
@@ -1203,7 +1244,10 @@ export class SysMLModelProvider {
         const result: Record<string, ResolvedTypeDTO> = {};
 
         for (const symbol of symbols) {
-            // Only include definitions and typed usages
+            // Only include definitions and typed usages, keyed by a qualified name
+            // (one without, an anonymous element or a member of one, can't be referenced).
+            const qualifiedName = symbol.qualifiedName;
+            if (qualifiedName === undefined) continue;
             if (!isDefinition(symbol.kind) && symbol.typeNames.length === 0) {
                 continue;
             }
@@ -1239,8 +1283,8 @@ export class SysMLModelProvider {
                     };
                 });
 
-            result[symbol.qualifiedName] = {
-                qualifiedName: symbol.qualifiedName,
+            result[qualifiedName] = {
+                qualifiedName,
                 simpleName: symbol.name,
                 kind: symbol.kind,
                 isLibraryType: false,
@@ -1288,10 +1332,12 @@ export class SysMLModelProvider {
         // request's own diagnostics (Model Explorer, Dashboard, Feature
         // Inspector) explain *why* a reference is unresolved the same way the
         // editor's own diagnostics do, not just leave it unexplained.
-        const conflicts = findConflictedQualifiedNames(this.documentManager.getWorkspaceSymbolTable().getAllSymbols());
+        // By symbol ID: this document's own symbols carry the workspace's symbol IDs (`useWorkspaceIds`).
+        const conflicts = new Map([...findConflictingDeclarations(this.documentManager.getWorkspaceSymbolTable().getAllSymbols())]
+            .map(([declaration, group]) => [declaration.symbolId, group]));
 
         for (const symbol of symbols) {
-            const conflicting = conflicts.get(symbol.qualifiedName);
+            const conflicting = conflicts.get(symbol.symbolId);
             if (conflicting) {
                 const others = otherDeclarations(conflicting, symbol);
                 diagnostics.push({
@@ -1328,7 +1374,7 @@ export class SysMLModelProvider {
                 if (!hasEnumValues) {
                     diagnostics.push({
                         code: 'empty-enum',
-                        message: `Enumeration '${symbol.name}' has no enum values defined`,
+                        message: `Enumeration '${displayName(symbol)}' has no enum values defined`,
                         severity: 'info',
                         range: this.rangeToDTO(symbol.range),
                         elementName: symbol.name,
@@ -1357,9 +1403,9 @@ export class SysMLModelProvider {
         // The symbol table's children array may not be populated; use the
         // symbolsByUri list and filter by owning namespace instead.
         const allSymbols = symbolTable.getSymbolsForUri(parent.uri);
-        const anonymousById = anonymousSymbolsById(allSymbols);
+        const byId = symbolsById(allSymbols);
         const parentKey = namespaceKeyOf(parent);
-        return allSymbols.filter(s => ownerKeyOf(s, anonymousById) === parentKey);
+        return allSymbols.filter(s => ownerKeyOf(s, byId) === parentKey);
     }
 
     /**
@@ -1542,8 +1588,10 @@ export class SysMLModelProvider {
         return rels;
     }
 
-    /** Extract relationship keywords from element text. */
-    private extractKeywordRelationships(elementName: string, elementText: string): RelationshipDTO[] {
+    /** Extract relationship keywords from the text of `element`, the relationships' default source. */
+    private extractKeywordRelationships(element: SysMLSymbol, elementText: string): RelationshipDTO[] {
+        const elementName = element.name;
+        const fromElement = { source: elementName, sourceId: element.symbolId };
         elementText = stripComments(elementText);
         const rels: RelationshipDTO[] = [];
 
@@ -1551,14 +1599,14 @@ export class SysMLModelProvider {
         const subsetsPositions = findWordPositions(elementText, 'subsets');
         if (subsetsPositions.length > 0) {
             const [target] = readWordAfterKeyword(elementText, subsetsPositions[0].afterPos);
-            if (target) rels.push({ type: 'subsetting', source: elementName, target });
+            if (target) rels.push({ type: 'subsetting', ...fromElement, target });
         }
 
         // redefinition: `redefines X`
         const redefPositions = findWordPositions(elementText, 'redefines');
         if (redefPositions.length > 0) {
             const [target] = readWordAfterKeyword(elementText, redefPositions[0].afterPos);
-            if (target) rels.push({ type: 'redefinition', source: elementName, target });
+            if (target) rels.push({ type: 'redefinition', ...fromElement, target });
         }
 
         // satisfy: `satisfy [requirement] X [by Y]`
@@ -1573,14 +1621,14 @@ export class SysMLModelProvider {
             const [reqName, afterReq] = readNameOrQuoted(elementText, pos);
             if (reqName && reqName !== 'requirement') {
                 // Check for 'by <satisfier>' clause
-                let satisfier = elementName;
+                let satisfier: Pick<RelationshipDTO, 'source' | 'sourceId'> = fromElement;
                 const byPos = skipWS(elementText, afterReq);
                 const [byWord, afterBy] = readIdent(elementText, byPos);
                 if (byWord === 'by') {
                     const [byTarget] = readNameOrQuoted(elementText, skipWS(elementText, afterBy));
-                    if (byTarget) satisfier = byTarget;
+                    if (byTarget) satisfier = { source: byTarget };
                 }
-                rels.push({ type: 'satisfy', source: satisfier, target: reqName });
+                rels.push({ type: 'satisfy', ...satisfier, target: reqName });
             }
         }
 
@@ -1596,14 +1644,14 @@ export class SysMLModelProvider {
             const [reqName, afterReq] = readNameOrQuoted(elementText, pos);
             if (reqName && reqName !== 'requirement') {
                 // Check for 'by <verifier>' clause
-                let verifier = elementName;
+                let verifier: Pick<RelationshipDTO, 'source' | 'sourceId'> = fromElement;
                 const byPos = skipWS(elementText, afterReq);
                 const [byWord, afterBy] = readIdent(elementText, byPos);
                 if (byWord === 'by') {
                     const [byTarget] = readNameOrQuoted(elementText, skipWS(elementText, afterBy));
-                    if (byTarget) verifier = byTarget;
+                    if (byTarget) verifier = { source: byTarget };
                 }
-                rels.push({ type: 'verify', source: verifier, target: reqName });
+                rels.push({ type: 'verify', ...verifier, target: reqName });
             }
         }
 
@@ -1615,7 +1663,8 @@ export class SysMLModelProvider {
         symbol: SysMLSymbol,
         lines: string[],
     ): { condition: string; target: string }[] {
-        const elementText = this.getElementText(symbol, lines);
+        // A decision's branches are the `if ... then ...;` / `else ...;` statements following it.
+        const elementText = `${this.getElementText(symbol, lines)}\n${this.followingBranchStatements(symbol, lines)}`;
         const branches: { condition: string; target: string }[] = [];
 
         // Find all 'if' keywords and extract condition + target
@@ -1646,6 +1695,23 @@ export class SysMLModelProvider {
         }
 
         return branches;
+    }
+
+    /**
+     * The `if ...;` and `else ...;` statements directly following `symbol` in
+     * the source, up to the first statement that is neither.
+     */
+    private followingBranchStatements(symbol: SysMLSymbol, lines: string[]): string {
+        const { line, character } = symbol.range.end;
+        const after = [lines[line]?.slice(character) ?? '', ...lines.slice(line + 1)].join('\n');
+        const statements: string[] = [];
+        for (const [i, statement] of after.split(';').entries()) {
+            const text = statement.trim();
+            if (i === 0 && text === '') continue; // the rest of the decision's own statement
+            if (!/^(if|else)\b/.test(text)) break;
+            statements.push(`${text};`);
+        }
+        return statements.join('\n');
     }
 
     /**

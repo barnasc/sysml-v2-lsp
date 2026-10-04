@@ -114,7 +114,9 @@ export interface SysMLModelResult {
             unusedDefinitions: number;
             documentationCoverage: number;
             hotspots: {
-                qualifiedName: string;
+                /** null for a definition without a qualified name (inside an anonymous element). */
+                qualifiedName: string | null;
+                symbolId: string;
                 kind: string;
                 childCount: number;
                 depth: number;
@@ -174,8 +176,22 @@ export interface SysMLElementDTO {
      */
     type: string;
 
-    /** Element name. Use 'unnamed' for anonymous elements. */
+    /** Element name; empty for an anonymous element, flagged by `attributes.isAnonymous`. */
     name: string;
+
+    /**
+     * Text to show for the element, as in the outline: its name; for an
+     * anonymous element its declaration without a name (`: Engine`), else what
+     * it connects (`a.p→b.p`), else its declaration as written (`decide`).
+     */
+    displayName: string;
+
+    /**
+     * The element's symbol ID: a version 5 UUID derived from the project ID and
+     * its name, or, without one, its declaration. The same after a reload, but
+     * not the KerML `elementId`: a rename gives a new one.
+     */
+    symbolId: string;
 
     /** Source location. */
     range: RangeDTO;
@@ -200,6 +216,7 @@ export interface SysMLElementDTO {
      *   modifier      – Element modifiers (abstract, etc.)
      *   value         – Default/assigned value
      *   visibility    – 'public' | 'private' | 'protected'
+     *   isAnonymous   – true for an element without a name (its `name` is empty)
      */
     attributes: Record<string, string | number | boolean>;
 
@@ -230,6 +247,12 @@ export interface RelationshipDTO {
 
     /** Source element name (absent for shorthand satisfy/verify without `by`). */
     source?: string;
+
+    /** `symbolId` of the source element, when the source is the element declaring the relationship. */
+    sourceId?: string;
+
+    /** `symbolId` of the element that is the relationship itself (a connection, allocation, transition or flow usage). */
+    symbolId?: string;
 
     /** Target element name. */
     target: string;
