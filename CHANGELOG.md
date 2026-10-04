@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.33.0]
+
 ### Added
 
 - Add a benchmark history report for stable folder-load and workspace-build metrics, with a summary table, Mermaid trend charts, per-commit run ranges, and plain-language faster/slower/no-clear-change verdicts.
