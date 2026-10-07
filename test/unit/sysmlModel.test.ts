@@ -1,6 +1,7 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { describe, expect, it } from 'vitest';
+import { relationshipSymbolId } from '../../server/src/symbols/ids.js';
 
 /**
  * Integration tests for the `sysml/model` custom LSP request.
@@ -222,6 +223,40 @@ package Test {
             expect(port!.attributes['portType']).toBe('PowerPort');
         });
 
+        it('should give each relationship an element declares its own ID, the same in both scopes and after edits elsewhere', async () => {
+            const text = `
+package Test {
+    part def A;
+    part def B;
+    part def C :> A, B;
+    part c : C :> a, b;
+    part a;
+    part b;
+}
+`;
+            const relationshipsOf = (model: Awaited<ReturnType<typeof getModelForText>>) => {
+                const pkg = model.elements!.find(e => e.name === 'Test')!;
+                const c = pkg.children.find(e => e.name === 'C')!;
+                const usage = pkg.children.find(e => e.name === 'c')!;
+                // A definition's inline `typing` is left out: the flat list omits it as a possible false positive.
+                const inline = [...c.relationships.filter(r => r.type === 'specializes'), ...usage.relationships];
+                return { c, usage, inline, flat: model.relationships!.filter(r => r.sourceId === c.symbolId || r.sourceId === usage.symbolId) };
+            };
+            const { c, usage, inline, flat } = relationshipsOf(await getModelForText(text, ['elements', 'relationships']));
+
+            expect(inline.slice(0, 2).map(r => r.symbolId)).toEqual([relationshipSymbolId(c.symbolId, 'specializes', 1), relationshipSymbolId(c.symbolId, 'specializes', 2)]);
+            expect(usage.relationships.find(r => r.type === 'typing')!.symbolId).toBe(relationshipSymbolId(usage.symbolId, 'typing', 1));
+            const ids = inline.map(r => r.symbolId);
+            expect(new Set(ids).size).toBe(ids.length);
+            expect(new Set([c.symbolId, usage.symbolId, ...ids]).size).toBe(ids.length + 2);
+            // The flat list reports the same relationships with the same IDs.
+            for (const relationship of inline) expect(flat).toContainEqual(relationship);
+
+            // A declaration added before them changes neither the elements' IDs nor their relationships'.
+            const edited = relationshipsOf(await getModelForText(text.replace('part def A;', 'part def Z :> A;\n    part def A;'), ['elements', 'relationships']));
+            expect(edited.inline.map(r => r.symbolId)).toEqual(ids);
+        });
+
         it('should report each symbol\'s ID, and it as the source of its relationships', async () => {
             const model = await getModelForText(`
 package Test {
@@ -238,8 +273,9 @@ package Test {
             const ids = [pkg, vehicle, engine].map(e => e.symbolId);
             expect(ids.every(id => /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id))).toBe(true);
             expect(new Set(ids).size).toBe(3);
-            expect(engine.relationships).toEqual([{ type: 'typing', source: 'engine', sourceId: engine.symbolId, target: 'Engine' }]);
-            expect(model.relationships).toContainEqual({ type: 'typing', source: 'engine', sourceId: engine.symbolId, target: 'Engine' });
+            const typing = { type: 'typing', source: 'engine', sourceId: engine.symbolId, target: 'Engine', symbolId: relationshipSymbolId(engine.symbolId, 'typing', 1) };
+            expect(engine.relationships).toEqual([typing]);
+            expect(model.relationships).toContainEqual(typing);
         });
 
         it('should report each element\'s displayName: its name, or for an anonymous one the text the outline shows', async () => {
@@ -304,10 +340,10 @@ package Demo {
 
             const sys = model.elements!.find(e => e.name === 'Demo')!.children.find(e => e.name === 'sys')!;
             const rels = model.relationships!.filter(r => r.type === 'satisfy' || r.type === 'verify');
-            expect(rels).toContainEqual({ type: 'satisfy', source: 'sys', sourceId: sys.symbolId, target: 'r' });
-            expect(rels).toContainEqual({ type: 'verify', source: 'sys', sourceId: sys.symbolId, target: 'r' });
-            // `by sys` gives the source as written: a name, without a symbol ID.
-            expect(rels.filter(r => r.type === 'verify' && r.source === 'sys' && r.sourceId === undefined)).toHaveLength(1);
+            expect(rels).toContainEqual({ type: 'satisfy', source: 'sys', sourceId: sys.symbolId, target: 'r', symbolId: relationshipSymbolId(sys.symbolId, 'satisfy', 1) });
+            expect(rels).toContainEqual({ type: 'verify', source: 'sys', sourceId: sys.symbolId, target: 'r', symbolId: relationshipSymbolId(sys.symbolId, 'verify', 1) });
+            // `by sys` gives the source as written: a name, without a symbol ID, so the relationship has none either.
+            expect(rels.filter(r => r.type === 'verify' && r.source === 'sys' && r.sourceId === undefined && r.symbolId === undefined)).toHaveLength(1);
         });
 
         it('should report the workspace\'s symbol IDs, distinct for declarations clashing across documents', async () => {
@@ -1787,6 +1823,7 @@ package Test {
                 source: 'f',
                 sourceId: flow!.symbolId,
                 target: 'F',
+                symbolId: relationshipSymbolId(flow!.symbolId, 'typing', 1),
             });
             expect(flow!.relationships).toContainEqual({
                 type: 'flow',

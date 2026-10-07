@@ -188,6 +188,17 @@ export class IdRegistry {
 }
 
 /**
+ * The symbol ID of a relationship its source element declares (KerML 9.1: a
+ * relationship is an element too): the `ordinal`th (1-based) of that element's
+ * relationships of `type`, as a version 5 UUID of `type#ordinal` in the
+ * namespace of the source's symbol ID. Stable while the source's symbol ID and
+ * its relationships of that type are; a rename of the source gives a new one.
+ */
+export function relationshipSymbolId(sourceId: string, type: string, ordinal: number): string {
+    return uuidV5(sourceId, `${type}#${ordinal}`);
+}
+
+/**
  * An element's own path segment: its name as written, or, anonymous, its
  * declaration as written. A declaration starts with a keyword or symbol, and a
  * path segment of it follows a `/`, so it never equals a qualified name.

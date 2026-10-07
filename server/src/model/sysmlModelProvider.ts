@@ -13,6 +13,7 @@ import { DocumentManager } from '../documentManager.js';
 import { getLibraryPackageNames } from '../library/libraryIndex.js';
 import { ParseResult } from '../parser/parseDocument.js';
 import { NamespaceKey, NamespaceResolver, buildSymbolIndexes, describeConflictingDeclarations, findConflictingDeclarations, namespaceKeyOf, otherDeclarations, ownerKeyOf } from '../symbols/namespaceResolver.js';
+import { relationshipSymbolId } from '../symbols/ids.js';
 import { SymbolTable } from '../symbols/symbolTable.js';
 import {
     SysMLElementKind,
@@ -514,6 +515,8 @@ export class SysMLModelProvider {
             });
         }
 
+        withRelationshipIds(relationships);
+
         return {
             type: symbol.kind as string,
             name: symbol.name,
@@ -648,6 +651,7 @@ export class SysMLModelProvider {
             const additionalRels = this.extractKeywordRelationships(symbol, elementText);
             relationships.push(...additionalRels);
         }
+        withRelationshipIds(relationships);
 
         // Scan for standalone satisfy/verify statements that aren't part of any
         // symbol (e.g. top-level `satisfy X by Y;` inside a package).
@@ -1988,5 +1992,20 @@ export class SysMLModelProvider {
             isDefinition: symbol.kind === SysMLElementKind.ActionDef,
             range: this.rangeToDTO(symbol.range),
         };
+    }
+}
+
+/**
+ * Give each relationship declared by its source element (`sourceId`) that isn't an element of its
+ * own (no `symbolId` yet) its symbol ID, numbering them per source and type in list order.
+ */
+function withRelationshipIds(relationships: RelationshipDTO[]): void {
+    const counts = new Map<string, number>();
+    for (const relationship of relationships) {
+        if (relationship.sourceId === undefined || relationship.symbolId !== undefined) continue;
+        const key = `${relationship.sourceId}\n${relationship.type}`;
+        const ordinal = (counts.get(key) ?? 0) + 1;
+        counts.set(key, ordinal);
+        relationship.symbolId = relationshipSymbolId(relationship.sourceId, relationship.type, ordinal);
     }
 }

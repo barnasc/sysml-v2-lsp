@@ -251,7 +251,11 @@ export interface RelationshipDTO {
     /** `symbolId` of the source element, when the source is the element declaring the relationship. */
     sourceId?: string;
 
-    /** `symbolId` of the element that is the relationship itself (a connection, allocation, transition or flow usage). */
+    /**
+     * `symbolId` of the relationship: of the element that is the relationship itself (a connection,
+     * allocation, transition or flow usage), else, for one with a `sourceId`, its own, derived from
+     * the source's and its position among the source's relationships of the same `type`.
+     */
     symbolId?: string;
 
     /** Target element name. */

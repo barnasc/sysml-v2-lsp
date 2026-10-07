@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Every relationship in `sysml/model` that an element declares (`sourceId`), such as `typing`, `specializes`, `subsetting` or `redefinition`, reports its own `symbolId`, as connections, allocations, transitions and flows already did: KerML 9.1 makes a relationship an element. It is derived from the source's `symbolId` and the relationship's position among the source's relationships of the same type (`type#n`), so it survives reloads and edits elsewhere, and is the same in the `elements` and `relationships` scopes.
+
 ## [0.34.0]
 
 ### Added
