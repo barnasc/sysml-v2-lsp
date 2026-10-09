@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.35.0]
+
 ### Added
 
 - Add Copilot guidance to check generated and upstream-managed files during changes and reviews, fix their source of truth rather than editing overwritten artifacts, and validate fixes after regeneration.
