@@ -1589,3 +1589,57 @@ describe('anonymous usages and definitions', () => {
         expect(members.map((s) => [s.name, s.qualifiedName])).toEqual([['m', undefined], ['n', undefined]]);
     });
 });
+
+describe('concern definitions and usages', () => {
+    it('should extract concern definitions and usages as namespaces of their own', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def Unit;
+    concern def Hazard {
+        subject unit : Unit;
+        attribute severity;
+    }
+    concern overTemperature : Hazard {
+        attribute limit;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const hazard = st.getSymbol('Demo::Hazard');
+        const overTemperature = st.getSymbol('Demo::overTemperature');
+        expect(hazard).toMatchObject({ kind: 'concern def' });
+        expect(overTemperature).toMatchObject({ kind: 'concern', typeNames: ['Hazard'] });
+        expect(st.getSymbol('Demo::Hazard::severity')?.parentId).toBe(hazard?.symbolId);
+        expect(st.getSymbol('Demo::overTemperature::limit')?.parentId).toBe(overTemperature?.symbolId);
+        expect(st.getSymbol('Demo::limit')).toBeUndefined();
+    });
+
+    it('should extract framed concerns as concern usages that own their members', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    concern def Hazard;
+    concern overTemperature : Hazard;
+    requirement def Safety {
+        frame concern thermal : Hazard { attribute limit; }
+        frame concern voltage : Hazard { attribute limit; }
+        frame overTemperature { attribute margin; }
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const safety = st.getSymbol('Demo::Safety')!;
+        for (const name of ['thermal', 'voltage']) {
+            const framed = st.getSymbol(`Demo::Safety::${name}`);
+            expect(framed).toMatchObject({ kind: 'concern', typeNames: ['Hazard'], parentId: safety.symbolId });
+            expect(st.getSymbol(`Demo::Safety::${name}::limit`)?.parentId).toBe(framed?.symbolId);
+        }
+        expect(st.getSymbol('Demo::Safety::limit')).toBeUndefined();
+
+        // `frame overTemperature` refers to a concern declared elsewhere: it declares no name of its own.
+        const referenced = st.getAllSymbols().find(s => s.kind === 'concern' && s.parentId === safety.symbolId && !s.name);
+        expect(referenced).toMatchObject({ declaration: 'overTemperature' });
+        expect(st.getAllSymbols().find(s => s.name === 'margin')?.parentId).toBe(referenced?.symbolId);
+    });
+});
