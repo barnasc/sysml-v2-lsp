@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Visit each specialization ancestor only once when resolving inherited constraint features, preventing exponential queue growth through layered diamond inheritance (#127).
+- Hide implicitly redefined requirement subjects according to the declaring requirement's specialization ancestors, including redundant direct bases in multiple inheritance, while preserving subjects from unrelated branches.
 - Display decoded filesystem paths in workspace-folder logs and clarify that
   element ID namespaces are used locally, without network access. Emit this
   internal namespace information at debug level instead of info.
