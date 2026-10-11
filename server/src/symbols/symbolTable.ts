@@ -1431,13 +1431,7 @@ export class SymbolTable {
         return segment ? this.unquoteName(segment) : undefined;
     }
 
-    /**
-     * An element's declaration as written, without its body: its tokens up to
-     * its body or closing `;`, each exactly as written (a quoted name keeps its
-     * spaces), with one space wherever the source has whitespace or a comment
-     * between two of them (`connect a.p to b.p`, `connection : Conn`).
-     */
-    private declarationText(ctx: ParserRuleContext): string | undefined {
+    private declarationTokens(ctx: ParserRuleContext): Token[] {
         const tokens: Token[] = [];
         const visit = (node: ParserRuleContext): boolean => {
             for (let i = 0; i < node.getChildCount(); i++) {
@@ -1452,6 +1446,17 @@ export class SymbolTable {
             return false;
         };
         visit(ctx);
+        return tokens;
+    }
+
+    /**
+     * An element's declaration as written, without its body: its tokens up to
+     * its body or closing `;`, each exactly as written (a quoted name keeps its
+     * spaces), with one space wherever the source has whitespace or a comment
+     * between two of them (`connect a.p to b.p`, `connection : Conn`).
+     */
+    private declarationText(ctx: ParserRuleContext): string | undefined {
+        const tokens = this.declarationTokens(ctx);
         let text = '';
         tokens.forEach((token, i) => {
             if (i > 0 && token.start > tokens[i - 1].stop + 1) text += ' ';
@@ -1623,9 +1628,8 @@ export class SymbolTable {
 
         // Fallback: regex on the declaration portion only (before '{').
         // This avoids matching types from nested body content.
-        const fullText = ctx.getText();
-        const braceIdx = fullText.indexOf('{');
-        let text = braceIdx >= 0 ? fullText.substring(0, braceIdx) : fullText;
+        const { text: declarationText, quotedName } = this.maskedDeclaration(ctx);
+        let text = declarationText;
 
         // Truncate at SysML keywords that follow a usage declaration but appear
         // concatenated (getText() strips whitespace).  This prevents the regex
@@ -1640,8 +1644,8 @@ export class SymbolTable {
         if (specMatch) {
             const specStr = text.substring(text.indexOf(specMatch[0]) + specMatch[0].indexOf(specMatch[1]));
             for (const part of specStr.split(',')) {
-                const qm = part.match(RE_QUOTED_NAME);
-                if (qm) { names.push(qm[1]); continue; }
+                const quoted = quotedName(part);
+                if (quoted !== undefined) { names.push(quoted); continue; }
                 const m = part.trim().match(RE_IDENT_START);
                 if (m) names.push(m[1]);
             }
@@ -1665,8 +1669,8 @@ export class SymbolTable {
             const fullMatchIdx = text.indexOf(typingMatch[0]);
             const afterColon = text.substring(fullMatchIdx + 1).trim();
             for (const part of afterColon.split(',')) {
-                const qm = part.match(RE_QUOTED_NAME);
-                if (qm) { names.push(qm[1]); continue; }
+                const quoted = quotedName(part);
+                if (quoted !== undefined) { names.push(quoted); continue; }
                 const m = part.trim().match(RE_IDENT_START);
                 if (m) names.push(m[1]);
             }
@@ -1674,6 +1678,29 @@ export class SymbolTable {
         }
 
         return names;
+    }
+
+    /**
+     * The declaration tokens before the body, with each lexer STRING token
+     * replaced by a numbered placeholder (`'0'`, `'1'`, ...), and
+     * `quotedName`, which turns a placeholder in a part of that text back into
+     * the name. SysML 2.0 section 7.2.2 permits punctuation in unrestricted
+     * names (the STRING lexer production), so fallback regexes must never see
+     * their `:`, `:>`, `{` or keywords. Documentation is not a name token.
+     */
+    private maskedDeclaration(ctx: ParserRuleContext): { text: string; quotedName: (part: string) => string | undefined } {
+        const quoted: string[] = [];
+        const masked = this.declarationTokens(ctx).map(token => {
+            const text = token.text ?? '';
+            return token.type === SysMLv2Lexer.STRING ? `'${quoted.push(text.slice(1, -1)) - 1}'` : text;
+        }).join('');
+        return {
+            text: masked,
+            quotedName: (part) => {
+                const qm = part.match(RE_QUOTED_NAME);
+                return qm ? quoted[Number(qm[1])] : undefined;
+            },
+        };
     }
 
     /**
@@ -1690,17 +1717,15 @@ export class SymbolTable {
         // Regex fallback: look for :> / specializes / :>> / subsets.
         // Use the spec-aware truncate variant so that `subsets <name>` is not
         // stripped before we have a chance to match it.
-        const fullText = ctx.getText();
-        const braceIdx = fullText.indexOf('{');
-        let text = braceIdx >= 0 ? fullText.substring(0, braceIdx) : fullText;
-        text = text.replace(RE_KEYWORD_TRUNCATE_SPEC, '');
+        const { text: declarationText, quotedName } = this.maskedDeclaration(ctx);
+        const text = declarationText.replace(RE_KEYWORD_TRUNCATE_SPEC, '');
 
         const specMatch = text.match(RE_SPEC_WITH_SUBSETS);
         if (specMatch) {
             const specStr = text.substring(text.indexOf(specMatch[0]) + specMatch[0].indexOf(specMatch[1]));
             for (const part of specStr.split(',')) {
-                const qm = part.match(RE_QUOTED_NAME);
-                if (qm) { names.push(qm[1]); continue; }
+                const quoted = quotedName(part);
+                if (quoted !== undefined) { names.push(quoted); continue; }
                 const m = part.trim().match(RE_IDENT_START);
                 if (m) names.push(m[1]);
             }

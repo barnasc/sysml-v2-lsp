@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- A colon, `:>`, `{` or keyword inside a quoted name is no longer read as part of a declaration: `package 'Structure: System Context'` was typed `System` and reported as `unresolved-type`, and `part def 'Unit: Main'` was typed `Main`. Type and specialization fallback extraction masks the declaration's lexer `STRING` tokens, without scanning documentation or nested members, avoiding quadratic regex backtracking on quote-heavy comments (#134).
 - Visit each specialization ancestor only once when resolving inherited constraint features, preventing exponential queue growth through layered diamond inheritance (#127).
 - Hide implicitly redefined requirement subjects according to the declaring requirement's specialization ancestors, including redundant direct bases in multiple inheritance, while preserving subjects from unrelated branches.
 - Display decoded filesystem paths in workspace-folder logs and clarify that

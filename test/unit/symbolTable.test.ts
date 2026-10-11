@@ -1483,6 +1483,80 @@ describe('anonymous elements indexed by symbol ID', () => {
     });
 });
 
+describe('quoted names with a colon or keyword', () => {
+    it('should mask only declaration tokens and never quoted text in documentation', async () => {
+        const { SysMLv2Parser } = await import('../../server/src/generated/SysMLv2Parser.js');
+        const { st, result } = await buildST(`package 'Structure: { then \\' Context' {
+    doc /* 'a quoted name' :> 'a false type' */
+}`);
+        expect(result.errors).toHaveLength(0);
+        const pending = [result.tree!];
+        let packageContext;
+        while (pending.length > 0) {
+            const current = pending.pop()!;
+            if (current.ruleIndex === SysMLv2Parser.RULE_package) {
+                packageContext = current;
+                break;
+            }
+            for (let index = 0; index < current.getChildCount(); index++) {
+                const child = current.getChild(index);
+                if (child && 'ruleIndex' in child) pending.push(child as typeof current);
+            }
+        }
+        expect(packageContext).toBeDefined();
+        const masked = st['maskedDeclaration'](packageContext!);
+        expect(masked.text).toBe("package'0'");
+        expect(masked.quotedName("'0'")).toBe("Structure: { then \\' Context");
+        expect(masked.quotedName("'1'")).toBeUndefined();
+    });
+
+    it('should extract symbols promptly from quote-heavy documentation', async () => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        const { SymbolTable } = await import('../../server/src/symbols/symbolTable.js');
+        const comment = String.raw`\'`.repeat(32_768);
+        const result = parseDocument(`package 'Structure: System Context' {
+    part def 'Unit: Main';
+    part unit : 'Unit: Main';
+    doc /* ${comment} */
+}`);
+        expect(result.errors).toHaveLength(0);
+        const st = new SymbolTable();
+        const start = performance.now();
+        st.build('test://quotes.sysml', result);
+        const elapsed = performance.now() - start;
+        expect(st.getAllSymbols().map(symbol => [symbol.name, symbol.typeNames])).toEqual([
+            ['Structure: System Context', []],
+            ['Unit: Main', []],
+            ['unit', ['Unit: Main']],
+        ]);
+        expect(elapsed).toBeLessThan(1_000);
+    }, 15_000);
+
+    it('should take no type from a quoted name, and keep a quoted type whole', async () => {
+        const { st, result } = await buildST(`
+package P {
+    package 'Structure: System Context' {
+        part def 'Unit: Main';
+        part def 'Spare: Unit then more' :> 'Unit: Main';
+        part 'unit: main' : 'Unit: Main';
+        attribute def 'Mode: A';
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const typesOf = (name: string) => {
+            const symbol = st.getAllSymbols().find(s => s.name === name);
+            return [symbol?.typeNames, symbol?.specializationNames];
+        };
+        expect(typesOf('Structure: System Context')).toEqual([[], []]);
+        expect(typesOf('Unit: Main')).toEqual([[], []]);
+        expect(typesOf('Mode: A')).toEqual([[], []]);
+        expect(typesOf('Spare: Unit then more')).toEqual([['Unit: Main'], ['Unit: Main']]);
+        expect(typesOf('unit: main')[0]).toEqual(['Unit: Main']);
+    });
+});
+
 describe('isAnonymous and displayName', () => {
     const base = { kind: 'connection' as SysMLSymbol['kind'], symbolId: 'id', range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, uri: 'test://t.sysml', typeNames: [], specializationNames: [], children: [] };
 
