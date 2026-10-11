@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Custom LSP request `sysml/validateText` (`{ documents: [{ uri, text }] }`, one or more): the diagnostics each text would get as an open document, all validated together against the whole workspace, without opening a document, publishing diagnostics or changing any state. Each text replaces the current content of its `uri`'s document, if there is one.
+
 ## [0.36.0]
 
 ### Fixed

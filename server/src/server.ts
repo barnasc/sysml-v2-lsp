@@ -54,6 +54,7 @@ import { ReferencesProvider } from './providers/referencesProvider.js';
 import { RenameProvider } from './providers/renameProvider.js';
 import { SemanticTokensProvider, tokenModifiers, tokenTypes } from './providers/semanticTokensProvider.js';
 import { SemanticValidator } from './providers/semanticValidator.js';
+import { TextValidationProvider, type ValidateTextParams, type ValidateTextResult } from './providers/textValidationProvider.js';
 import { isInFolder, isSameDocumentUri } from './utils/documentUri.js';
 import { DEFAULT_SKIP_DIRS, findSysMLFilesAsync, readFilesBatch } from './utils/fileDiscovery.js';
 import { DEFAULT_URL_PREFIX, type FolderProjectId, getUrlPrefix, setFolderProjectIds, setProjectId } from './utils/uuid.js';
@@ -93,6 +94,7 @@ const renameProvider = new RenameProvider(documentManager);
 const codeActionProvider = new CodeActionProvider(documentManager);
 const formattingProvider = new FormattingProvider(documents);
 const semanticValidator = new SemanticValidator(documentManager);
+const textValidationProvider = new TextValidationProvider(documentManager, semanticValidator);
 
 // Share the server-level semantic validator with hover so it reuses cached indexes.
 hoverProvider.setSemanticValidator(semanticValidator);
@@ -1104,6 +1106,15 @@ connection.onRequest('sysml/model', async (params: SysMLModelParams) => {
 connection.onRequest('sysml/elementLookup', async (params: SysMLElementLookupParams) => {
     await initialization;
     return elementLookupProvider.elementLookup(params);
+});
+
+/**
+ * `sysml/validateText` — validates text against the workspace without
+ * opening a document or publishing diagnostics; see `TextValidationProvider`.
+ */
+connection.onRequest('sysml/validateText', async (params: ValidateTextParams): Promise<ValidateTextResult> => {
+    await initialization;
+    return textValidationProvider.validate(params);
 });
 
 /**

@@ -22,6 +22,8 @@ export class DocumentManager {
      * indexed yet" apart from "genuinely doesn't exist".
      */
     private workspaceScanComplete = true;
+    /** Last version given to a stand-in document by `withTexts` (negative, counting down). */
+    private temporaryVersion = 0;
 
     /**
      * Parse a document and cache the result.
@@ -251,6 +253,34 @@ export class DocumentManager {
         // Also evict from the workspace symbol table
         this.wsSymbolTable.removeUri(uri);
         this.wsBuiltVersions.delete(uri);
+    }
+
+    /**
+     * Runs `fn` with each text standing in for the document at its uri (or
+     * added as a new document), all at once, then restores the previous
+     * state. `fn` must be synchronous: no other request can run in between,
+     * so no other request ever sees the temporary texts. Every text is
+     * parsed before anything changes. The stand-ins get negative versions
+     * no real document has, so caches keyed by version never confuse them
+     * with the real documents.
+     */
+    withTexts<T>(documents: readonly { uri: string; text: string }[], fn: () => T): T {
+        const parsed = documents.map(({ uri, text }) => ({ uri, text, result: parseDocument(text) }));
+        const previous = new Map(parsed.map(({ uri }) => [uri, this.cache.get(uri)]));
+        for (const { uri, text, result } of parsed) {
+            this.cache.set(uri, { version: --this.temporaryVersion, text, result, needsParse: false });
+        }
+        try {
+            return fn();
+        } finally {
+            for (const [uri, entry] of previous) {
+                if (entry) this.cache.set(uri, entry);
+                else this.cache.delete(uri);
+                // Drop the stand-in's symbols; the real document's are rebuilt on next use.
+                this.wsSymbolTable.removeUri(uri);
+                this.wsBuiltVersions.delete(uri);
+            }
+        }
     }
 
     /**
