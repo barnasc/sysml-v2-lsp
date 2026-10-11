@@ -46,13 +46,13 @@ describe('TextValidationProvider', () => {
         expect(codes(validateOne('package Car { private import Parts::*; part gearbox : Gearbox; }'))).toContain('unresolved-type');
     });
 
-    it('validates a text as the new content of its uri\'s document, not as a second copy', async () => {
+    it('validates a text as if it were the content of its uri\'s document, not as a second copy', async () => {
         const uri = 'file:///ws/engine.sysml';
         const { validateOne } = await setup([{ uri, text: 'part def Engine;' }]);
 
         // As a new document, a second top-level Engine clashes with the existing one ...
         expect(codes(validateOne('part def Engine;'))).toContain('ambiguous-namespace-name');
-        // ... as the new content of engine.sysml, it replaces it.
+        // ... checked as engine.sysml's content, it takes the existing one's place in the check.
         expect(codes(validateOne('part def Engine;', uri))).not.toContain('ambiguous-namespace-name');
     });
 
@@ -237,11 +237,11 @@ describe('TextValidationProvider', () => {
             expect(result.documents.map(d => d.uri)).toEqual(['file:///C%3A/ws/motors.sysml', 'file:///c:/ws/vehicle.sysml']);
             expect(codes(result.documents[0].diagnostics)).toContain('unresolved-type');
             expect(codes(result.documents[1].diagnostics)).not.toContain('unresolved-type');
-            // The motors text replaced the scanned document (another spelling of its uri): no clash.
+            // The motors text was checked in place of the scanned document (another spelling of its uri): no clash.
             expect(result.documents.flatMap(d => codes(d.diagnostics))).not.toContain('ambiguous-namespace-name');
         });
 
-        it('replaces several existing documents at once, and changes nothing', async () => {
+        it('checks new contents for several existing documents at once, and changes nothing', async () => {
             const { dm, semanticValidator, validator } = await setup([motors, vehicle]);
             const symbolsBefore = dm.getWorkspaceSymbolTable().getAllSymbols().map(s => s.qualifiedName).sort();
             const vehicleBefore = semanticValidator.validate(vehicle.uri);

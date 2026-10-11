@@ -8,8 +8,9 @@ import { SemanticValidator } from './semanticValidator.js';
 /** One text to validate. */
 export interface ValidateTextDocument {
     /**
-     * The document the text is the new content of, so its current content
-     * is left out and the two versions don't clash; or a new document.
+     * The document the text is validated as the content of: its current
+     * content is left out of the check (not changed), so the two versions
+     * don't clash. Or a document that doesn't exist yet.
      */
     uri: string;
     /** The SysML or KerML text. */
