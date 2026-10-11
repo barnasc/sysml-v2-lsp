@@ -1,6 +1,6 @@
 /**
- * `sysml/validateText`: validating one or more texts against the workspace
- * without changing the server's state.
+ * `sysml/validateText`: validating one or more texts against the elaborated
+ * model without changing the server's state.
  */
 import { describe, expect, it } from 'vitest';
 

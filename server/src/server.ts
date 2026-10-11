@@ -1109,8 +1109,9 @@ connection.onRequest('sysml/elementLookup', async (params: SysMLElementLookupPar
 });
 
 /**
- * `sysml/validateText` — validates text against the workspace without
- * opening a document or publishing diagnostics; see `TextValidationProvider`.
+ * `sysml/validateText` — validates text fragments against the elaborated
+ * model without opening a document or publishing diagnostics; see
+ * `TextValidationProvider`.
  */
 connection.onRequest('sysml/validateText', async (params: ValidateTextParams): Promise<ValidateTextResult> => {
     await initialization;

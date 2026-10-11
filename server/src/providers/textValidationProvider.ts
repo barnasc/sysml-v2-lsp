@@ -27,9 +27,10 @@ export interface ValidateTextResult {
 }
 
 /**
- * Validates texts against the whole workspace (references to other files
- * and the standard library resolve) without changing any state: no
- * document is opened, nothing is published, and every cache is as before.
+ * Validates texts against the elaborated model (the workspace's documents
+ * and the standard library, so references to them resolve) without
+ * changing any state: no document is opened, nothing is published, and
+ * every cache is as before.
  */
 export class TextValidationProvider {
     constructor(
