@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.36.0]
+
 ### Fixed
 
 - `incompatible-port-types` resolves each end of a `connect` through the features its path names (`a.p.q`), not by the port's name alone. Feature types and their supertypes are resolved in their declaring namespace, so unrelated same-named definitions cannot hide a real mismatch. When two parts each had a port of the same name, the first one declared stood in for both, causing false warnings or missed mismatches. An unresolved path still falls back to the name when only one port has it (#135).
