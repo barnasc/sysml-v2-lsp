@@ -46,6 +46,12 @@ export interface ResolvedMember {
     visibility: 'public' | 'private' | 'protected';
 }
 
+/** A reference may be missing or ambiguous; only missing names allow library fallback. */
+export interface NameResolution {
+    readonly symbol?: SysMLSymbol;
+    readonly ambiguous: boolean;
+}
+
 /** Permissiveness order for picking the effective visibility when the same
  *  element has more than one membership of a namespace 
  * (see `getResolvedMembers`'s `addMember`).
@@ -128,10 +134,14 @@ export function memberNamesOf(symbol: SysMLSymbol): string[] {
  */
 export function findConflictingDeclarations(allSymbols: SysMLSymbol[]): Map<SysMLSymbol, SysMLSymbol[]> {
     const conflicting = new Map<SysMLSymbol, SysMLSymbol[]>();
-    const add = (groups: Map<string, SysMLSymbol[]>) => {
-        for (const group of groups.values()) for (const s of group) conflicting.set(s, group);
+    const add = (groups: Iterable<SysMLSymbol[]>) => {
+        for (const group of groups) {
+            for (const s of group) {
+                conflicting.set(s, [...new Set([...(conflicting.get(s) ?? []), ...group])]);
+            }
+        }
     };
-    add(findConflictedQualifiedNames(allSymbols));
+    add(findConflictedQualifiedNames(allSymbols).values());
     const membersOfAnonymous = allSymbols.filter(s => s.qualifiedName === undefined && !isAnonymous(s) && s.parentId !== undefined);
     const byOwner = new Map<string, SysMLSymbol[]>();
     for (const s of membersOfAnonymous) {
@@ -139,8 +149,8 @@ export function findConflictingDeclarations(allSymbols: SysMLSymbol[]): Map<SysM
         list.push(s);
         byOwner.set(s.parentId!, list);
     }
-    for (const members of byOwner.values()) add(groupConflicts(members, s => s.name));
-    for (const { symbols } of findConflictingShortNames(allSymbols).values()) for (const s of symbols) conflicting.set(s, symbols);
+    for (const members of byOwner.values()) add(groupConflicts(members, s => s.name).values());
+    add([...findConflictingShortNames(allSymbols).values()].map(group => group.symbols));
     return conflicting;
 }
 
@@ -442,6 +452,18 @@ export class NamespaceResolver {
         return this.resolveQualifiedNameFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes);
     }
 
+    /** Resolve an editor reference without losing the reason a name is unresolved. */
+    resolveReferenceIn(namespace: SysMLSymbol | undefined, name: string, indexes: SymbolIndexes): NameResolution {
+        return this.resolveQualifiedReferenceFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes);
+    }
+
+    /** Resolve a public qualified or feature-path member, without enclosing-scope fallback. */
+    resolveMemberReference(owner: SysMLSymbol, name: string, indexes: SymbolIndexes): NameResolution {
+        const members = this.getResolvedMembers(namespaceKeyOf(owner), indexes).get(name);
+        if (members && this.isAmbiguous(name, members, indexes)) return { ambiguous: true };
+        return this.referenceTo(members?.find(member => member.visibility === 'public')?.symbol, indexes);
+    }
+
     /**
      * Resolve a (possibly qualified) name to its symbol per §7.5.1, searching
      * outward from namespace `start` and its enclosing namespaces (its own resolved
@@ -453,18 +475,22 @@ export class NamespaceResolver {
      * its own enclosing package already imported, per §7.5.1/§7.5.3).
      */
     private resolveQualifiedNameFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
+        return this.resolveQualifiedReferenceFrom(start, name, indexes).symbol;
+    }
+
+    private resolveQualifiedReferenceFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes): NameResolution {
         const [first, ...rest] = splitQualifiedName(name);
 
         let resolved: SysMLSymbol | undefined;
         for (const ancestor of this.namespaceAncestorsOf(start, indexes)) {
             const candidates = this.getResolvedMembers(ancestor, indexes).get(first);
             if (candidates && candidates.length > 0) {
-                if (this.isAmbiguous(first, candidates, indexes)) return undefined;
+                if (this.isAmbiguous(first, candidates, indexes)) return { ambiguous: true };
                 resolved = candidates[0].symbol;
                 break;
             }
         }
-        if (resolved === undefined) return undefined;
+        if (resolved === undefined) return { ambiguous: false };
 
         // A segment beyond the first isn't reached through the resolving
         // context's own ancestor chain (unlike the first segment, found above
@@ -482,17 +508,23 @@ export class NamespaceResolver {
             const owner: SysMLSymbol = resolved;
             const ownerKey = namespaceKeyOf(owner);
             const members: ResolvedMember[] | undefined = this.getResolvedMembers(ownerKey, indexes).get(segment);
-            if (members && this.isAmbiguous(segment, members, indexes)) return undefined;
+            if (members && this.isAmbiguous(segment, members, indexes)) return { ambiguous: true };
             const visibleMember: ResolvedMember | undefined = members?.find(
                 (m: ResolvedMember) => m.visibility === 'public'
                     || isWithinStart(ownerKey)
                     || (m.visibility === 'protected' && this.isProtectedVisibleFrom(start, owner, indexes)),
             );
-            if (!visibleMember) return undefined;
+            if (!visibleMember) return { ambiguous: false };
             resolved = visibleMember.symbol;
         }
         // A qualified name clashing with another declaration's is left unresolved (`byQualifiedName`).
-        return resolved.qualifiedName !== undefined ? indexes.byQualifiedName.get(resolved.qualifiedName) : resolved;
+        return this.referenceTo(resolved, indexes);
+    }
+
+    private referenceTo(resolved: SysMLSymbol | undefined, indexes: SymbolIndexes): NameResolution {
+        if (!resolved) return { ambiguous: false };
+        const symbol = resolved.qualifiedName !== undefined ? indexes.byQualifiedName.get(resolved.qualifiedName) : resolved;
+        return { symbol, ambiguous: symbol === undefined };
     }
 
     /**

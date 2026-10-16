@@ -6,7 +6,7 @@ import type { CompletionItem, Diagnostic, Hover, Location, WorkspaceEdit } from 
 
 const serverPath = fileURLToPath(new URL('../../dist/server/server.js', import.meta.url));
 
-it('handles Unicode names and worker positions through the real LSP transport', async () => {
+it('handles Unicode names, short-name ambiguity and worker positions through the real LSP transport', async () => {
     const rpc = await import('../../server/node_modules/vscode-jsonrpc/lib/node/main.js');
     const child = fork(serverPath, ['--node-ipc'], { silent: true });
     const connection = rpc.createMessageConnection(new rpc.IPCMessageReader(child), new rpc.IPCMessageWriter(child));
@@ -82,11 +82,39 @@ it('handles Unicode names and worker positions through the real LSP transport', 
         });
         expect(JSON.stringify(unitHover.contents)).toContain('ohm');
 
+        const ambiguous = `package P {
+    attribute def <'Shared\u{1f680}'> Beta;
+    attribute def <'Shared\u{1f680}'> Gamma;
+    attribute local : 'Shared\u{1f680}';
+    attribute qualified : P::'Shared\u{1f680}';
+}`;
+        const ambiguousDoc = TextDocument.create(uri, 'sysml', 2, ambiguous);
+        const ambiguousDiagnostics = nextDiagnostics(diagnostics =>
+            diagnostics.filter(d => d.code === 'ambiguous-namespace-name').length === 2);
+        await connection.sendNotification('textDocument/didChange', {
+            textDocument: { uri, version: 2 }, contentChanges: [{ text: ambiguous }],
+        });
+        expect((await ambiguousDiagnostics).filter(d => d.code === 'unresolved-type')).toHaveLength(2);
+        for (const line of [3, 4]) {
+            const start = ambiguousDoc.offsetAt({ line, character: 0 });
+            const position = ambiguousDoc.positionAt(ambiguous.indexOf("'Shared", start) + 1);
+            const params = { textDocument: { uri }, position };
+            expect(await connection.sendRequest('textDocument/definition', params)).toBeNull();
+            expect(await connection.sendRequest('textDocument/hover', params)).toBeNull();
+            expect(await connection.sendRequest('textDocument/prepareRename', params)).toBeNull();
+            expect(await connection.sendRequest('textDocument/rename', {
+                ...params, newName: 'Changed',
+            })).toBeNull();
+            expect(await connection.sendRequest('textDocument/references', {
+                ...params, context: { includeDeclaration: true },
+            })).toEqual([]);
+        }
+
         const invalid = "package '\u{1f680}' { part def default; }";
         const workerDiagnostics = nextDiagnostics(diagnostics =>
             diagnostics.some(d => d.message.includes('reserved SysML keyword')));
         await connection.sendNotification('textDocument/didChange', {
-            textDocument: { uri, version: 2 }, contentChanges: [{ text: invalid }],
+            textDocument: { uri, version: 3 }, contentChanges: [{ text: invalid }],
         });
         const keyword = (await workerDiagnostics).find(d => d.message.includes('reserved SysML keyword'))!;
         expect(keyword.range.start.character).toBe(invalid.indexOf('default'));

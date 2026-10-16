@@ -26,6 +26,7 @@ export class DefinitionProvider {
         // Workspace-wide symbol table for cross-file lookups (imports etc.)
         const wsSymbolTable = this.documentManager.getWorkspaceSymbolTable();
         const reference = new NameReferences(this.documentManager).at(params.textDocument.uri, params.position);
+        if (reference?.isAmbiguous) return null;
         if (reference?.symbol && !reference.isDeclaration) {
             return { uri: reference.symbol.uri, range: reference.symbol.selectionRange };
         }
@@ -162,4 +163,3 @@ export class DefinitionProvider {
         return extractQualifiedNameAt(lineText, character);
     }
 }
-
