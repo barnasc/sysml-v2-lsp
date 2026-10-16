@@ -52,10 +52,14 @@ function generatePackage(name: string, lines: number, imported?: string): string
 }
 
 /** A package of at most `maxLines` lines, and close to it. */
-function generatePackageOfLines(name: string, maxLines: number, imported?: string): string {
+function generatePackageOfLines(name: string, maxLines: number, maxCharacters: number, imported?: string): string {
     let lines = maxLines;
     let text = generatePackage(name, lines, imported);
-    while (lineCount(text) > maxLines) text = generatePackage(name, lines -= BLOCK_LINES, imported);
+    while (lineCount(text) > maxLines || text.length > maxCharacters) {
+        lines -= BLOCK_LINES;
+        if (lines < 2) throw new Error('validateText benchmark limits are too small for a package');
+        text = generatePackage(name, lines, imported);
+    }
     return text;
 }
 
@@ -76,7 +80,10 @@ function setup(workspace: ValidateTextDocument[]) {
     }
     const semanticValidator = new SemanticValidator(dm);
     const provider = new TextValidationProvider(dm, semanticValidator);
-    provider.configure({ enabled: true, maxDocuments: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER });
+    provider.configure({
+        enabled: true, maxDocuments: Number.MAX_SAFE_INTEGER, maxLines: Number.MAX_SAFE_INTEGER,
+        maxCharacters: Number.MAX_SAFE_INTEGER, maxTotalCharacters: Number.MAX_SAFE_INTEGER,
+    });
     // Validating every document once builds the caches an idle server has.
     for (const { uri } of workspace) semanticValidator.validate(uri);
     return { dm, semanticValidator, provider };
@@ -152,12 +159,22 @@ export function runValidateTextSuite(opts: BenchmarkOptions = {}): SuiteReport {
     }
 
     // ── The largest request the default limits accept ──
-    const { maxDocuments, maxLines } = DEFAULT_TEXT_VALIDATION_SETTINGS;
+    const { maxDocuments, maxLines, maxCharacters, maxTotalCharacters } = DEFAULT_TEXT_VALIDATION_SETTINGS;
+    provider.configure({ ...DEFAULT_TEXT_VALIDATION_SETTINGS, enabled: true });
     const largest = Array.from({ length: maxDocuments }, (_, i) => ({
         uri: `file:///ws/largest${i}.sysml`,
-        text: generatePackageOfLines(`Largest${i}`, maxLines, 'P99'),
+        text: generatePackageOfLines(`Largest${i}`, maxLines,
+            Math.min(maxCharacters, Math.floor(maxTotalCharacters / maxDocuments)), 'P99'),
     }));
     results.push(benchmarkRequest('limits/defaults', provider, largest, opts));
+    let dense = 'package Dense { ';
+    for (let i = 0; ; i++) {
+        const next = `part def Type${i}; part usage${i} : Type${i}; `;
+        if (dense.length + next.length + 1 > maxCharacters) break;
+        dense += next;
+    }
+    results.push(benchmarkRequest('limits/single-line', provider,
+        [{ uri: 'file:///ws/dense.sysml', text: dense + '}' }], opts));
 
     // ── The cost a request leaves behind: the next semantic validation of an open document ──
     const open = workspace[50];

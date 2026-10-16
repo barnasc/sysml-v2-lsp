@@ -32,7 +32,12 @@ describe('sysml/validateText (real server)', () => {
     /** The result of a request sent right after `initialized`, before anything else. */
     let early: Promise<ValidateTextResult>;
     /** The client's `sysml.experimental` settings, as the server pulls them. */
-    const experimental = { validateText: { enabled: true, maxDocuments: 2, maxLines: 5 } };
+    const experimental = {
+        validateText: {
+            enabled: true, maxDocuments: 2, maxLines: 5,
+            maxCharacters: 256, maxTotalCharacters: 384,
+        },
+    };
 
     /** Starts the server over IPC and records every published diagnostics uri. */
     async function connect() {
@@ -150,6 +155,18 @@ describe('sysml/validateText (real server)', () => {
         ])).rejects.toMatchObject({ code: -32602, message: expect.stringContaining('sysml.experimental.validateText.maxDocuments') });
         await expect(validate([{ uri: at('a.sysml'), text: 'package A {\n\n\n\n\n}\n' }]))
             .rejects.toMatchObject({ code: -32602, message: expect.stringContaining('sysml.experimental.validateText.maxLines') });
+        await expect(validate([{ uri: at('a.sysml'), text: ' '.repeat(257) }]))
+            .rejects.toMatchObject({ code: -32602, message: expect.stringContaining('sysml.experimental.validateText.maxCharacters') });
+        expect(codes(await validate([
+            { uri: at('a.sysml'), text: ' '.repeat(192) },
+            { uri: at('b.sysml'), text: ' '.repeat(192) },
+        ]))).toEqual([[], []]);
+        await expect(validate([
+            { uri: at('a.sysml'), text: ' '.repeat(192) },
+            { uri: at('b.sysml'), text: ' '.repeat(193) },
+        ])).rejects.toMatchObject({
+            code: -32602, message: expect.stringContaining('sysml.experimental.validateText.maxTotalCharacters'),
+        });
     });
 
     it('answers malformed parameters with InvalidParams (-32602)', async () => {
@@ -158,6 +175,42 @@ describe('sysml/validateText (real server)', () => {
             code: -32602,
             message: expect.stringContaining('documents[0] needs "uri"'),
         });
+    });
+
+    it('does not reuse cached symbols at the maximum real LSP version', async () => {
+        const started = await connect();
+        const rpc = started.connection;
+        rpc.onRequest('client/registerCapability', () => null);
+        rpc.onRequest('workspace/configuration', (params: { items: { section?: string }[] }) =>
+            params.items.map(item => item.section === 'sysml.experimental'
+                ? { validateText: { enabled: true } } : {}));
+        rpc.listen();
+        try {
+            await rpc.sendRequest('initialize', {
+                processId: process.pid, rootUri: null,
+                capabilities: { workspace: { configuration: true } },
+            });
+            await rpc.sendNotification('initialized', {});
+            const uri = 'file:///version-collision.sysml';
+            await rpc.sendNotification('textDocument/didOpen', {
+                textDocument: {
+                    uri, languageId: 'sysml', version: 2 ** 31 - 1,
+                    text: 'package P { part def Existing; part original : Existing; }',
+                },
+            });
+            await rpc.sendRequest('sysml/model', {
+                textDocument: { uri }, scope: ['elements', 'diagnostics'],
+            });
+            const result = await rpc.sendRequest<ValidateTextResult>('sysml/validateText', {
+                documents: [{ uri, text: 'package P { part proposed : Missing; }' }],
+            });
+            expect(result.documents[0].diagnostics.filter(d => d.code === 'unresolved-type')
+                .map(d => d.message)).toEqual([expect.stringContaining('Missing')]);
+            expect(result.documents[0].diagnostics.some(d => d.message.includes('Existing'))).toBe(false);
+        } finally {
+            rpc.dispose();
+            started.server.kill();
+        }
     });
 
     it('answers MethodNotFound (-32601) once the client disables it', async () => {

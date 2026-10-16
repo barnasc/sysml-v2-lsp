@@ -40,6 +40,27 @@ usage names or unrelated same-named declarations. Completion and rename insert
 the required quotes and escapes automatically; editor positions use UTF-16,
 including after characters outside the Basic Multilingual Plane.
 
+### Experimental text validation
+
+`sysml/validateText` checks proposed document texts against the current workspace,
+including unsaved documents, without opening documents or publishing diagnostics.
+It is disabled by default. Enable `sysml.experimental.validateText.enabled` to use it.
+Requests contain `documents`, an array of `{ uri, text }` entries. The response
+contains each requested URI and its diagnostics, in request order.
+
+The default limits are 5 documents, 200 lines per document, 8,192 characters per
+document, and 16,384 characters across the request. Characters are UTF-16 code
+units, so an emoji outside the Basic Multilingual Plane counts as two.
+The corresponding settings are `maxDocuments`, `maxLines`, `maxCharacters` and
+`maxTotalCharacters` under `sysml.experimental.validateText`.
+Oversized requests fail with `InvalidParams` before parsing or changing cached
+documents. Disabled requests fail with `MethodNotFound`.
+
+Only requested documents are checked. Include an affected existing document
+with its current text to check it too. Results use the server's existing
+diagnostic checks; they do not certify complete SysML conformance.
+Input limits reduce work but do not guarantee a fixed response time.
+
 ### Install from Marketplace
 
 Install via the VS Code extension from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=JamieD.sysml-v2-support).

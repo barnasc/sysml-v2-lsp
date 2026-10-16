@@ -19,7 +19,6 @@ import { runProviderSuite } from './suites/providers.bench.js';
 import { runMemorySuite } from './suites/memory.bench.js';
 import { runThroughputSuite } from './suites/throughput.bench.js';
 import { runFolderLoadSuite } from './suites/folderLoad.bench.js';
-import { runValidateTextSuite } from './suites/validateText.bench.js';
 import { buildReport, writeReport, writeBaseline, loadBaseline, type SuiteReport } from './reporters/jsonReporter.js';
 import { writeMarkdownReport } from './reporters/markdownReporter.js';
 import { compareReports, formatRegressionSummary } from './utils/regression.js';
@@ -117,7 +116,8 @@ const SUITE_RUNNERS: Record<string, SuiteRunner> = {
     memory: runMemorySuite,
     throughput: runThroughputSuite,
     folderLoad: runFolderLoadSuite,
-    validateText: runValidateTextSuite,
+    // The CI baseline may predate this provider.
+    validateText: async opts => (await import('./suites/validateText.bench.js')).runValidateTextSuite(opts),
 };
 
 const ALL_SUITES = Object.keys(SUITE_RUNNERS);

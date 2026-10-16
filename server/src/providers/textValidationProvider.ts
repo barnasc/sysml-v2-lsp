@@ -39,17 +39,23 @@ export interface TextValidationSettings {
     maxDocuments: number;
     /** Most lines one document's text may have (see `lineCount`). */
     maxLines: number;
+    /** Most UTF-16 code units one document's text may have. */
+    maxCharacters: number;
+    /** Most UTF-16 code units all texts in one request may have together. */
+    maxTotalCharacters: number;
 }
 
 /**
- * Off by default. The default limits are small, so a request keeps the
- * server busy for about a tenth of a second at most (`validateText`
- * benchmark suite); a client that needs more raises them in its settings.
+ * Off by default. Document, line and character limits bound the input,
+ * including dense single-line text. Runtime also depends on the workspace
+ * and model complexity; these limits do not promise a fixed response time.
  */
 export const DEFAULT_TEXT_VALIDATION_SETTINGS: Readonly<TextValidationSettings> = {
     enabled: false,
     maxDocuments: 5,
     maxLines: 200,
+    maxCharacters: 8_192,
+    maxTotalCharacters: 16_384,
 };
 
 /**
@@ -58,11 +64,13 @@ export const DEFAULT_TEXT_VALIDATION_SETTINGS: Readonly<TextValidationSettings> 
  */
 export function readTextValidationSettings(section: unknown): TextValidationSettings {
     const raw = (typeof section === 'object' && section !== null ? section : {}) as Record<string, unknown>;
-    const limit = (value: unknown, fallback: number) => (Number.isInteger(value) && (value as number) > 0 ? value as number : fallback);
+    const limit = (value: unknown, fallback: number) => (Number.isSafeInteger(value) && (value as number) > 0 ? value as number : fallback);
     return {
         enabled: raw.enabled === true,
         maxDocuments: limit(raw.maxDocuments, DEFAULT_TEXT_VALIDATION_SETTINGS.maxDocuments),
         maxLines: limit(raw.maxLines, DEFAULT_TEXT_VALIDATION_SETTINGS.maxLines),
+        maxCharacters: limit(raw.maxCharacters, DEFAULT_TEXT_VALIDATION_SETTINGS.maxCharacters),
+        maxTotalCharacters: limit(raw.maxTotalCharacters, DEFAULT_TEXT_VALIDATION_SETTINGS.maxTotalCharacters),
     };
 }
 
@@ -111,13 +119,21 @@ export class TextValidationProvider {
     /** `documents` checked: a non-empty array of `{ uri, text }` within the limits, each naming a different document. */
     private checkDocuments(documents: unknown): ValidateTextDocument[] {
         if (!Array.isArray(documents) || documents.length === 0) invalid('"documents" must be a non-empty array of { uri, text }.');
-        const { maxDocuments, maxLines } = this.settings;
+        const { maxDocuments, maxLines, maxCharacters, maxTotalCharacters } = this.settings;
         if (documents.length > maxDocuments) {
             invalid(`${documents.length} documents, more than the ${maxDocuments} allowed (sysml.experimental.validateText.maxDocuments).`);
         }
         const checked = documents as Partial<ValidateTextDocument>[];
+        let totalCharacters = 0;
         checked.forEach((document, index) => {
             if (typeof document?.text !== 'string') invalid(`documents[${index}] needs "text", the SysML text to validate.`);
+            if (document.text.length > maxCharacters) {
+                invalid(`documents[${index}] has ${document.text.length} characters, more than the ${maxCharacters} allowed (sysml.experimental.validateText.maxCharacters).`);
+            }
+            totalCharacters += document.text.length;
+            if (totalCharacters > maxTotalCharacters) {
+                invalid(`${totalCharacters} total characters, more than the ${maxTotalCharacters} allowed (sysml.experimental.validateText.maxTotalCharacters).`);
+            }
             const lines = lineCount(document.text);
             if (lines > maxLines) {
                 invalid(`documents[${index}] has ${lines} lines, more than the ${maxLines} allowed (sysml.experimental.validateText.maxLines).`);

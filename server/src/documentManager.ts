@@ -25,10 +25,10 @@ export class DocumentManager {
     /**
      * Last version given to a stand-in text by `withTexts`. Caches keyed by
      * version assume one text per uri and version, so each stand-in gets a
-     * version no real document has: counting down from the largest LSP
-     * integer (not negative, which means "no such document").
+     * version outside the LSP integer range (LSP 3.17, base types).
+     * These internal positive versions are never sent to the client.
      */
-    private temporaryVersion = 2 ** 31;
+    private temporaryVersion = 2 ** 31 - 1;
 
     /**
      * Parse a document and cache the result.
@@ -270,10 +270,13 @@ export class DocumentManager {
      * real documents.
      */
     withTexts<T>(documents: readonly { uri: string; text: string }[], fn: () => T): T {
+        if (!Number.isSafeInteger(this.temporaryVersion + documents.length)) {
+            throw new RangeError('Temporary document version space exhausted.');
+        }
         const parsed = documents.map(({ uri, text }) => ({ uri, text, result: parseDocument(text) }));
         const previous = new Map(parsed.map(({ uri }) => [uri, this.cache.get(uri)]));
         for (const { uri, text, result } of parsed) {
-            this.cache.set(uri, { version: --this.temporaryVersion, text, result, needsParse: false });
+            this.cache.set(uri, { version: ++this.temporaryVersion, text, result, needsParse: false });
         }
         try {
             return fn();

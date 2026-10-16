@@ -12,11 +12,14 @@
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Diagnostic } from 'vscode-languageserver/node';
 import type { TextValidationSettings } from '../../server/src/providers/textValidationProvider.js';
 
-const enabled: TextValidationSettings = { enabled: true, maxDocuments: 10, maxLines: 1_000 };
+const enabled: TextValidationSettings = {
+    enabled: true, maxDocuments: 10, maxLines: 1_000,
+    maxCharacters: 1_000_000, maxTotalCharacters: 10_000_000,
+};
 
 /** A document manager holding `entries`, with a text validator over it, enabled unless `settings` say otherwise. */
 async function setup(
@@ -112,7 +115,7 @@ describe('TextValidationProvider', () => {
             const { validator } = await setup([], readTextValidationSettings({ enabled: true }));
             const documents = (count: number, lines: number) => Array.from({ length: count }, (_, i) => ({
                 uri: `file:///ws/d${i}.sysml`,
-                text: `package D${i} {\n${'    part def P;\n'.repeat(lines - 2)}}\n`,
+                text: `package D${i} {\n${'\n'.repeat(lines - 2)}}\n`,
             }));
             expect(validator.validate({ documents: documents(5, 200) }).documents).toHaveLength(5);
             expect(rpcError(InvalidParams, () => validator.validate({ documents: documents(6, 3) })).message)
@@ -123,11 +126,11 @@ describe('TextValidationProvider', () => {
 
         it('applies the limits the client configured, larger or smaller than the defaults', async () => {
             const text = (lines: number) => `package A {\n${'\n'.repeat(lines - 2)}}\n`;
-            const larger = await setup([], { enabled: true, maxDocuments: 20, maxLines: 400 });
+            const larger = await setup([], { ...enabled, maxDocuments: 20, maxLines: 400 });
             expect(larger.validateOne(text(400))).toBeDefined();
             rpcError(InvalidParams, () => larger.validateOne(text(401)));
 
-            const smaller = await setup([], { enabled: true, maxDocuments: 1, maxLines: 2 });
+            const smaller = await setup([], { ...enabled, maxDocuments: 1, maxLines: 2 });
             expect(smaller.validateOne(text(2))).toBeDefined();
             rpcError(InvalidParams, () => smaller.validateOne(text(3)));
             rpcError(InvalidParams, () => smaller.validator.validate({
@@ -146,11 +149,20 @@ describe('TextValidationProvider', () => {
             const { readTextValidationSettings, DEFAULT_TEXT_VALIDATION_SETTINGS: defaults } = await import('../../server/src/providers/textValidationProvider.js');
             expect(readTextValidationSettings(undefined)).toEqual(defaults);
             expect(readTextValidationSettings(null)).toEqual(defaults);
-            expect(defaults).toEqual({ enabled: false, maxDocuments: 5, maxLines: 200 });
+            expect(defaults).toEqual({
+                enabled: false, maxDocuments: 5, maxLines: 200,
+                maxCharacters: 8_192, maxTotalCharacters: 16_384,
+            });
             expect(readTextValidationSettings({ enabled: true, maxDocuments: 3, maxLines: 500 }))
-                .toEqual({ enabled: true, maxDocuments: 3, maxLines: 500 });
+                .toEqual({ ...defaults, enabled: true, maxDocuments: 3, maxLines: 500 });
             expect(readTextValidationSettings({ enabled: 'yes', maxDocuments: 0, maxLines: -1 })).toEqual(defaults);
             expect(readTextValidationSettings({ maxDocuments: 2.5, maxLines: '100' })).toEqual(defaults);
+            expect(readTextValidationSettings({ maxCharacters: 20_000, maxTotalCharacters: 30_000 }))
+                .toEqual({ ...defaults, maxCharacters: 20_000, maxTotalCharacters: 30_000 });
+            for (const value of [0, -1, 1.5, '8192', null, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+                expect(readTextValidationSettings({ maxCharacters: value, maxTotalCharacters: value }))
+                    .toEqual(defaults);
+            }
         });
 
         it('counts lines as an editor shows them', async () => {
@@ -164,7 +176,7 @@ describe('TextValidationProvider', () => {
         });
 
         it('accepts a request at the limits', async () => {
-            const { validator } = await setup([], { enabled: true, maxDocuments: 2, maxLines: 3 });
+            const { validator } = await setup([], { ...enabled, maxDocuments: 2, maxLines: 3 });
             const result = validator.validate({
                 documents: [{ uri: 'file:///ws/a.sysml', text: 'package A {\n    part def B;\n}\n' }, { uri: 'file:///ws/b.sysml', text: 'package B;' }],
             });
@@ -175,10 +187,66 @@ describe('TextValidationProvider', () => {
             ['more documents than maxDocuments', { documents: [motors, { uri: 'file:///ws/a.sysml', text: '' }, { uri: 'file:///ws/b.sysml', text: '' }] }, '3 documents, more than the 2 allowed'],
             ['a text longer than maxLines', { documents: [motors, { uri: 'file:///ws/a.sysml', text: 'package A {\n\n\n}' }] }, 'documents[1] has 4 lines, more than the 3 allowed'],
         ])('answers InvalidParams for %s, before anything changes', async (_case, params, mentions) => {
-            const { dm, validator } = await setup([motors], { enabled: true, maxDocuments: 2, maxLines: 3 });
+            const { dm, validator } = await setup([motors], { ...enabled, maxDocuments: 2, maxLines: 3 });
             expect(rpcError(InvalidParams, () => validator.validate(params)).message).toContain(mentions);
             expect(dm.getUris()).toEqual([motors.uri]);
             expect(dm.getText(motors.uri)).toBe(motors.text);
+        });
+
+        it('accepts exact default character limits and rejects one more before parsing', async () => {
+            const { readTextValidationSettings } = await import('../../server/src/providers/textValidationProvider.js');
+            const { dm, validator } = await setup([motors], readTextValidationSettings({ enabled: true }));
+            const text = ' '.repeat(8_192);
+            expect(validator.validate({
+                documents: [{ uri: motors.uri, text }, { uri: 'file:///ws/empty.sysml', text }],
+            }).documents).toHaveLength(2);
+            const parse = vi.spyOn(dm, 'withTexts');
+            const oversized = rpcError(InvalidParams, () => validator.validate({
+                documents: [{ uri: motors.uri, text: text + ' ' }],
+            }));
+            expect(oversized.message).toContain('sysml.experimental.validateText.maxCharacters');
+            const total = rpcError(InvalidParams, () => validator.validate({
+                documents: [
+                    { uri: motors.uri, text },
+                    { uri: 'file:///ws/empty.sysml', text },
+                    { uri: 'file:///ws/extra.sysml', text: ' ' },
+                ],
+            }));
+            expect(total.message).toContain('sysml.experimental.validateText.maxTotalCharacters');
+            expect(parse).not.toHaveBeenCalled();
+            expect(dm.getText(motors.uri)).toBe(motors.text);
+            expect(dm.getUris()).toEqual([motors.uri]);
+        });
+
+        it('rejects dense single-line input under default limits before parsing', async () => {
+            const { readTextValidationSettings } = await import('../../server/src/providers/textValidationProvider.js');
+            const { dm, validator } = await setup([motors], readTextValidationSettings({ enabled: true }));
+            const parse = vi.spyOn(dm, 'withTexts');
+            const text = 'package Generated { '
+                + Array.from({ length: 4_000 }, (_, i) => `part def Type${i}; part usage${i} : Type${i};`).join(' ')
+                + ' }';
+            expect(text).not.toContain('\n');
+            expect(rpcError(InvalidParams, () => validator.validate({
+                documents: [{ uri: motors.uri, text }],
+            })).message).toContain('sysml.experimental.validateText.maxCharacters');
+            expect(parse).not.toHaveBeenCalled();
+            expect(dm.getText(motors.uri)).toBe(motors.text);
+        });
+
+        it('counts UTF-16 code units and follows configured character limits', async () => {
+            const { readTextValidationSettings } = await import('../../server/src/providers/textValidationProvider.js');
+            const context = await setup([], readTextValidationSettings({
+                enabled: true, maxCharacters: 8, maxTotalCharacters: 9,
+            }));
+            expect(context.validateOne('/*\u{1f680}*/')).toEqual([]);
+            expect(context.validator.validate({ documents: [
+                { uri: 'file:///a.sysml', text: '    ' }, { uri: 'file:///b.sysml', text: '     ' },
+            ] }).documents).toHaveLength(2);
+            expect(rpcError(InvalidParams, () => context.validateOne('/*\u{1f680}\u{1f680}\u{1f680}*/')).message)
+                .toContain('maxCharacters');
+            expect(rpcError(InvalidParams, () => context.validator.validate({ documents: [
+                { uri: 'file:///a.sysml', text: '     ' }, { uri: 'file:///b.sysml', text: '     ' },
+            ] })).message).toContain('maxTotalCharacters');
         });
     });
 
@@ -460,6 +528,42 @@ describe('TextValidationProvider', () => {
 
             // And the cache filled during validation doesn't leak into the real documents afterwards.
             expect(codes(semanticValidator.validate(requirements.uri))).not.toContain('unsatisfied-requirement');
+        });
+
+        it.each([2 ** 31 - 1, 2 ** 31 - 2])('does not reuse real version %i or its cached symbols', async version => {
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+            const uri = 'file:///ws/version.sysml';
+            const original = 'package P { part def Existing; part original : Existing; }';
+            const { dm, semanticValidator, validator, validateOne } = await setup([]);
+            dm.parse(TextDocument.create(uri, 'sysml', version, original));
+            semanticValidator.validate(uri);
+            const result = validateOne('package P { part proposed : Missing; }', uri);
+            expect(result.filter(d => d.code === 'unresolved-type').map(d => d.message))
+                .toEqual([expect.stringContaining('Missing')]);
+            expect(result.some(d => d.message.includes('Existing'))).toBe(false);
+            validator.validate({ documents: [{ uri, text: 'package Other;' }] });
+            expect(dm.getText(uri)).toBe(original);
+            expect(dm.getVersion(uri)).toBe(version);
+            expect(codes(semanticValidator.validate(uri))).not.toContain('unresolved-type');
+        });
+
+        it('uses distinct internal versions above the LSP integer range', async () => {
+            const { dm } = await setup([]);
+            const uri = 'file:///ws/new.sysml';
+            const first = dm.withTexts([{ uri, text: 'package A;' }], () => dm.getVersion(uri));
+            const next = dm.withTexts([{ uri, text: 'package B;' }], () => dm.getVersion(uri));
+            expect(first).toBe(2 ** 31);
+            expect(next).toBe(first + 1);
+            expect(dm.getUris()).toEqual([]);
+        });
+
+        it('rejects exhausted internal versions without changing documents', async () => {
+            const motors = { uri: 'file:///ws/motors.sysml', text: 'package Motors { part def Motor; }' };
+            const { dm } = await setup([motors]);
+            dm['temporaryVersion'] = Number.MAX_SAFE_INTEGER;
+            expect(() => dm.withTexts([{ uri: motors.uri, text: 'package Other;' }], () => undefined))
+                .toThrow('Temporary document version space exhausted');
+            expect(dm.getText(motors.uri)).toBe(motors.text);
         });
 
         it('sees the relationships of the temporary texts: a satisfy added in a validated text satisfies', async () => {
