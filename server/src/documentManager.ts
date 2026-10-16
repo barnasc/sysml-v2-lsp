@@ -22,6 +22,13 @@ export class DocumentManager {
      * indexed yet" apart from "genuinely doesn't exist".
      */
     private workspaceScanComplete = true;
+    /**
+     * Last version given to a stand-in text by `withTexts`. Caches keyed by
+     * version assume one text per uri and version, so each stand-in gets a
+     * version outside the LSP integer range (LSP 3.17, base types).
+     * These internal positive versions are never sent to the client.
+     */
+    private temporaryVersion = 2 ** 31 - 1;
 
     /**
      * Parse a document and cache the result.
@@ -251,6 +258,37 @@ export class DocumentManager {
         // Also evict from the workspace symbol table
         this.wsSymbolTable.removeUri(uri);
         this.wsBuiltVersions.delete(uri);
+    }
+
+    /**
+     * Runs `fn` with each text standing in for the document at its uri (or
+     * added as a new document), all at once, then restores the previous
+     * state. `fn` must be synchronous: no other request can run in between,
+     * so no other request ever sees the temporary texts. Every text is
+     * parsed before anything changes. The stand-ins get versions no real
+     * document has, so caches keyed by version never confuse them with the
+     * real documents.
+     */
+    withTexts<T>(documents: readonly { uri: string; text: string }[], fn: () => T): T {
+        if (!Number.isSafeInteger(this.temporaryVersion + documents.length)) {
+            throw new RangeError('Temporary document version space exhausted.');
+        }
+        const parsed = documents.map(({ uri, text }) => ({ uri, text, result: parseDocument(text) }));
+        const previous = new Map(parsed.map(({ uri }) => [uri, this.cache.get(uri)]));
+        for (const { uri, text, result } of parsed) {
+            this.cache.set(uri, { version: ++this.temporaryVersion, text, result, needsParse: false });
+        }
+        try {
+            return fn();
+        } finally {
+            for (const [uri, entry] of previous) {
+                if (entry) this.cache.set(uri, entry);
+                else this.cache.delete(uri);
+                // Drop the stand-in's symbols; the real document's are rebuilt on next use.
+                this.wsSymbolTable.removeUri(uri);
+                this.wsBuiltVersions.delete(uri);
+            }
+        }
     }
 
     /**
