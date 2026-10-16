@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.37.0]
+
 ### Fixed
 
 - A quoted name in a feature value (`:>> referenceUnit = 'Ω'`) is no longer read as the feature's type and reported as `unresolved-type`.
