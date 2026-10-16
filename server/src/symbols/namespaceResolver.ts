@@ -32,6 +32,11 @@ export interface SymbolIndexes {
     byId: Map<string, SysMLSymbol>;
     definitionsByName: Map<string, SysMLSymbol[]>;
     portsByName: Map<string, SysMLSymbol[]>;
+    /**
+     * By name, the declarations known by that name that clash with another one
+     * on it in their namespace through a short name (`findConflictingShortNames`).
+     */
+    clashingShortNames: Map<string, Set<SysMLSymbol>>;
 }
 
 /** One entry in a namespace's resolved member table (see `NamespaceResolver.getResolvedMembers`). */
@@ -39,6 +44,12 @@ export interface ResolvedMember {
     symbol: SysMLSymbol;
     /** Effective visibility of this membership *within its resolving namespace*. */
     visibility: 'public' | 'private' | 'protected';
+}
+
+/** A reference may be missing or ambiguous; only missing names allow library fallback. */
+export interface NameResolution {
+    readonly symbol?: SysMLSymbol;
+    readonly ambiguous: boolean;
 }
 
 /** Permissiveness order for picking the effective visibility when the same
@@ -101,6 +112,14 @@ export function findConflictedQualifiedNames(allSymbols: SysMLSymbol[]): Map<str
 }
 
 /**
+ * The names a membership of `symbol` is known by: its name and its short name
+ * (KerML 8.2.3.5.3, `memberName` and `memberShortName`), each once.
+ */
+export function memberNamesOf(symbol: SysMLSymbol): string[] {
+    return symbol.shortName && symbol.shortName !== symbol.name ? [symbol.name, symbol.shortName] : [symbol.name];
+}
+
+/**
  * Every declaration whose name is not distinguishable from another one's in
  * the same namespace (see `findConflictedQualifiedNames`), mapped to all the
  * declarations it clashes with, itself included. Besides clashing qualified
@@ -108,13 +127,21 @@ export function findConflictedQualifiedNames(allSymbols: SysMLSymbol[]): Map<str
  * qualified name: two of them clash when they share their owner (by
  * `parentId`) and name. The two cases are grouped separately, so no
  * qualified name, however it is quoted, can be confused with an owner's symbol ID.
+ *
+ * A short name counts as well (KerML 7.2.5.2): two declarations in one
+ * namespace clash when either one's name or short name is the other's name
+ * or short name, e.g. `part def <A> Alpha;` and `part def A;`.
  */
 export function findConflictingDeclarations(allSymbols: SysMLSymbol[]): Map<SysMLSymbol, SysMLSymbol[]> {
     const conflicting = new Map<SysMLSymbol, SysMLSymbol[]>();
-    const add = (groups: Map<string, SysMLSymbol[]>) => {
-        for (const group of groups.values()) for (const s of group) conflicting.set(s, group);
+    const add = (groups: Iterable<SysMLSymbol[]>) => {
+        for (const group of groups) {
+            for (const s of group) {
+                conflicting.set(s, [...new Set([...(conflicting.get(s) ?? []), ...group])]);
+            }
+        }
     };
-    add(findConflictedQualifiedNames(allSymbols));
+    add(findConflictedQualifiedNames(allSymbols).values());
     const membersOfAnonymous = allSymbols.filter(s => s.qualifiedName === undefined && !isAnonymous(s) && s.parentId !== undefined);
     const byOwner = new Map<string, SysMLSymbol[]>();
     for (const s of membersOfAnonymous) {
@@ -122,15 +149,48 @@ export function findConflictingDeclarations(allSymbols: SysMLSymbol[]): Map<SysM
         list.push(s);
         byOwner.set(s.parentId!, list);
     }
-    for (const members of byOwner.values()) add(groupConflicts(members, s => s.name));
+    for (const members of byOwner.values()) add(groupConflicts(members, s => s.name).values());
+    add([...findConflictingShortNames(allSymbols).values()].map(group => group.symbols));
     return conflicting;
+}
+
+/**
+ * Declarations of one namespace sharing a name with a short name (or two short
+ * names), grouped as `findConflictingDeclarations` groups clashing names, each
+ * group with the name they clash on. The
+ * namespace is the owner's qualified name, so the fragments of a package
+ * declared in several documents are one namespace, else the owner's symbol ID
+ * for a member of an anonymous element; the two are keyed apart.
+ */
+function findConflictingShortNames(allSymbols: SysMLSymbol[]): Map<string, { name: string; symbols: SysMLSymbol[] }> {
+    const byId = new Map(allSymbols.map(s => [s.symbolId, s]));
+    const entries: Array<{ symbol: SysMLSymbol; key: string }> = [];
+    const keysWithShortName = new Set<string>();
+    for (const s of allSymbols) {
+        if (isAnonymous(s)) continue;
+        const owner = s.parentId ? byId.get(s.parentId) : undefined;
+        const namespace = owner === undefined ? 'q:'
+            : owner.qualifiedName !== undefined ? `q:${owner.qualifiedName}` : `id:${owner.symbolId}`;
+        for (const name of memberNamesOf(s)) {
+            const key = `${namespace}\0${name}`;
+            entries.push({ symbol: s, key });
+            if (name === s.shortName) keysWithShortName.add(key);
+        }
+    }
+    // Only a clash involving a short name; clashing names are found by name above.
+    const groups = groupKeyedConflicts(entries.filter(e => keysWithShortName.has(e.key)));
+    return new Map([...groups].map(([key, symbols]) => [key, { name: key.slice(key.indexOf('\0') + 1), symbols }]));
 }
 
 /** Group `symbols` by `keyOf`, keeping groups of two or more non-package declarations of one kind. */
 function groupConflicts(symbols: SysMLSymbol[], keyOf: (s: SysMLSymbol) => string): Map<string, SysMLSymbol[]> {
+    return groupKeyedConflicts(symbols.map(symbol => ({ symbol, key: keyOf(symbol) })));
+}
+
+/** As `groupConflicts`, for symbols already paired with their keys (one symbol may have several). */
+function groupKeyedConflicts(entries: Array<{ symbol: SysMLSymbol; key: string }>): Map<string, SysMLSymbol[]> {
     const byKeyAndKind = new Map<string, Map<SysMLElementKind, SysMLSymbol[]>>();
-    for (const s of symbols) {
-        const key = keyOf(s);
+    for (const { symbol: s, key } of entries) {
         let byKind = byKeyAndKind.get(key);
         if (!byKind) {
             byKind = new Map();
@@ -253,7 +313,15 @@ export function buildSymbolIndexes(allSymbols: SysMLSymbol[]): SymbolIndexes {
     for (const s of allSymbols) {
         byId.set(s.symbolId, s);
     }
-    const indexes: SymbolIndexes = { byName, byParent, byQualifiedName, byId, definitionsByName, portsByName };
+    // A name two declarations of a namespace clash on through a short name is
+    // left unresolved there, as a conflicted qualifiedName is (see `isAmbiguous`).
+    const clashingShortNames = new Map<string, Set<SysMLSymbol>>();
+    for (const { name, symbols } of findConflictingShortNames(allSymbols).values()) {
+        const clashing = clashingShortNames.get(name) ?? new Set<SysMLSymbol>();
+        for (const s of symbols) clashing.add(s);
+        clashingShortNames.set(name, clashing);
+    }
+    const indexes: SymbolIndexes = { byName, byParent, byQualifiedName, byId, definitionsByName, portsByName, clashingShortNames };
 
     for (const s of allSymbols) {
         if (isAnonymous(s)) continue;
@@ -384,6 +452,18 @@ export class NamespaceResolver {
         return this.resolveQualifiedNameFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes);
     }
 
+    /** Resolve an editor reference without losing the reason a name is unresolved. */
+    resolveReferenceIn(namespace: SysMLSymbol | undefined, name: string, indexes: SymbolIndexes): NameResolution {
+        return this.resolveQualifiedReferenceFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes);
+    }
+
+    /** Resolve a public qualified or feature-path member, without enclosing-scope fallback. */
+    resolveMemberReference(owner: SysMLSymbol, name: string, indexes: SymbolIndexes): NameResolution {
+        const members = this.getResolvedMembers(namespaceKeyOf(owner), indexes).get(name);
+        if (members && this.isAmbiguous(name, members, indexes)) return { ambiguous: true };
+        return this.referenceTo(members?.find(member => member.visibility === 'public')?.symbol, indexes);
+    }
+
     /**
      * Resolve a (possibly qualified) name to its symbol per §7.5.1, searching
      * outward from namespace `start` and its enclosing namespaces (its own resolved
@@ -395,17 +475,22 @@ export class NamespaceResolver {
      * its own enclosing package already imported, per §7.5.1/§7.5.3).
      */
     private resolveQualifiedNameFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes): SysMLSymbol | undefined {
+        return this.resolveQualifiedReferenceFrom(start, name, indexes).symbol;
+    }
+
+    private resolveQualifiedReferenceFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes): NameResolution {
         const [first, ...rest] = splitQualifiedName(name);
 
         let resolved: SysMLSymbol | undefined;
         for (const ancestor of this.namespaceAncestorsOf(start, indexes)) {
             const candidates = this.getResolvedMembers(ancestor, indexes).get(first);
             if (candidates && candidates.length > 0) {
+                if (this.isAmbiguous(first, candidates, indexes)) return { ambiguous: true };
                 resolved = candidates[0].symbol;
                 break;
             }
         }
-        if (resolved === undefined) return undefined;
+        if (resolved === undefined) return { ambiguous: false };
 
         // A segment beyond the first isn't reached through the resolving
         // context's own ancestor chain (unlike the first segment, found above
@@ -423,16 +508,34 @@ export class NamespaceResolver {
             const owner: SysMLSymbol = resolved;
             const ownerKey = namespaceKeyOf(owner);
             const members: ResolvedMember[] | undefined = this.getResolvedMembers(ownerKey, indexes).get(segment);
+            if (members && this.isAmbiguous(segment, members, indexes)) return { ambiguous: true };
             const visibleMember: ResolvedMember | undefined = members?.find(
                 (m: ResolvedMember) => m.visibility === 'public'
                     || isWithinStart(ownerKey)
                     || (m.visibility === 'protected' && this.isProtectedVisibleFrom(start, owner, indexes)),
             );
-            if (!visibleMember) return undefined;
+            if (!visibleMember) return { ambiguous: false };
             resolved = visibleMember.symbol;
         }
         // A qualified name clashing with another declaration's is left unresolved (`byQualifiedName`).
-        return resolved.qualifiedName !== undefined ? indexes.byQualifiedName.get(resolved.qualifiedName) : resolved;
+        return this.referenceTo(resolved, indexes);
+    }
+
+    private referenceTo(resolved: SysMLSymbol | undefined, indexes: SymbolIndexes): NameResolution {
+        if (!resolved) return { ambiguous: false };
+        const symbol = resolved.qualifiedName !== undefined ? indexes.byQualifiedName.get(resolved.qualifiedName) : resolved;
+        return { symbol, ambiguous: symbol === undefined };
+    }
+
+    /**
+     * Whether `name` names more than one of `candidates` that clash on it
+     * through a short name (`SymbolIndexes.clashingShortNames`), so it can't
+     * be resolved to either (KerML 7.2.5.2). Like a conflicted qualifiedName,
+     * it doesn't fall through to an enclosing namespace's member of that name.
+     */
+    private isAmbiguous(name: string, candidates: ResolvedMember[], indexes: SymbolIndexes): boolean {
+        const clashing = indexes.clashingShortNames.get(name);
+        return clashing !== undefined && candidates.filter(c => clashing.has(c.symbol)).length > 1;
     }
 
     /**

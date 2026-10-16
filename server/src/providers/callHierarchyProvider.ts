@@ -118,7 +118,9 @@ export class CallHierarchyProvider {
 
         const symbolTable = this.documentManager.getWorkspaceSymbolTable();
 
-        const symbol = new NameReferences(this.documentManager).at(uri, params.position)?.symbol ??
+        const reference = new NameReferences(this.documentManager).at(uri, params.position);
+        if (reference?.isAmbiguous) return null;
+        const symbol = reference?.symbol ??
             symbolTable.findSymbolAtPosition(uri, params.position.line, params.position.character);
         if (!symbol) return null;
 

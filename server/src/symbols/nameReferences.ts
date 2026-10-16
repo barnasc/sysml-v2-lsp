@@ -3,7 +3,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { DocumentManager } from '../documentManager.js';
 import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
 import { joinQualifiedName, scanFeaturePaths } from '../utils/identUtils.js';
-import { buildSymbolIndexes, namespaceKeyOf, NamespaceResolver } from './namespaceResolver.js';
+import { buildSymbolIndexes, NameResolution, NamespaceResolver } from './namespaceResolver.js';
 import { isAnonymous, SysMLSymbol } from './sysmlElements.js';
 
 export interface NameReference extends Location {
@@ -11,6 +11,7 @@ export interface NameReference extends Location {
     readonly qualifiedName: string;
     readonly symbol?: SysMLSymbol;
     readonly isDeclaration: boolean;
+    readonly isAmbiguous: boolean;
 }
 
 /** Source-token references shared by navigation and refactoring, resolved with SysML §7.5 visibility. */
@@ -67,9 +68,11 @@ export class NameReferences {
                 segment.name === target.name || segment.name === target.shortName))) continue;
             const namespace = namespaces.find(ns => ns.body < path.start && path.end <= ns.end);
             let receiver: SysMLSymbol | undefined;
+            let receiverAmbiguous = false;
             for (let group = 0; group < path.qualifiedNames.length; group++) {
                 const qualified = path.qualifiedNames[group];
                 let resolved: SysMLSymbol | undefined;
+                let ambiguous = false;
                 for (let index = 0; index < qualified.segments.length; index++) {
                     const segment = qualified.segments[index];
                     const range = Range.create(doc.positionAt(segment.start), doc.positionAt(segment.end));
@@ -84,47 +87,55 @@ export class NameReferences {
                         (symbol.shortName === segment.name && text[before] === '<' && text[after] === '>' &&
                             doc.offsetAt(symbol.range.start) <= segment.start &&
                             segment.end < doc.offsetAt(symbol.selectionRange.start))));
-                    if (declaration) resolved = declaration;
-                    else if (index > 0) {
-                        resolved = resolved
-                            ? this.resolver.getResolvedMembers(namespaceKeyOf(resolved), this.indexes)
-                                .get(segment.name)?.find(entry => entry.visibility === 'public')?.symbol
-                            : undefined;
+                    if (declaration) {
+                        resolved = declaration;
+                        ambiguous = false;
+                    } else if (index > 0) {
+                        if (resolved) {
+                            const result = this.resolver.resolveMemberReference(resolved, segment.name, this.indexes);
+                            resolved = result.symbol;
+                            ambiguous = result.ambiguous;
+                        }
                     } else if (group > 0) {
-                        resolved = receiver ? this.resolveFeature(receiver, segment.name) : undefined;
+                        const result: NameResolution = receiver ? this.resolveFeature(receiver, segment.name)
+                            : { ambiguous: receiverAmbiguous };
+                        resolved = result.symbol;
+                        ambiguous = result.ambiguous;
                     } else {
-                        resolved = this.resolver.resolveNameIn(
+                        const result = this.resolver.resolveReferenceIn(
                             namespace?.symbol, joinQualifiedName([segment.name]), this.indexes);
+                        resolved = result.symbol;
+                        ambiguous = result.ambiguous;
                     }
                     if (cursor !== undefined && (cursor < segment.start || cursor > segment.end)) continue;
                     if (target && segment.name !== target.name && segment.name !== target.shortName) continue;
                     refs.push({
                         uri, range, name: segment.name,
                         qualifiedName: index === qualified.segments.length - 1 ? qualified.name : segment.name,
-                        symbol: resolved, isDeclaration: declaration !== undefined,
+                        symbol: resolved, isDeclaration: declaration !== undefined, isAmbiguous: ambiguous,
                     });
                 }
                 receiver = resolved;
+                receiverAmbiguous = ambiguous;
             }
         }
         return refs;
     }
 
-    private resolveFeature(receiver: SysMLSymbol, name: string): SysMLSymbol | undefined {
+    private resolveFeature(receiver: SysMLSymbol, name: string): NameResolution {
         const queue = [receiver];
         const visited = new Set<SysMLSymbol>();
         for (let index = 0; index < queue.length; index++) {
             const owner = queue[index];
             if (visited.has(owner)) continue;
             visited.add(owner);
-            const member = this.resolver.getResolvedMembers(namespaceKeyOf(owner), this.indexes)
-                .get(name)?.find(entry => entry.visibility === 'public')?.symbol;
-            if (member) return member;
+            const member = this.resolver.resolveMemberReference(owner, name, this.indexes);
+            if (member.symbol || member.ambiguous) return member;
             for (const typeName of owner.typeNames) {
                 const type = this.resolver.resolveNameFrom(owner, typeName, this.indexes);
                 if (type && !visited.has(type)) queue.push(type);
             }
         }
-        return undefined;
+        return { ambiguous: false };
     }
 }

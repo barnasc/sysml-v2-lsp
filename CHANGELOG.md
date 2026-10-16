@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A short name that clashes with a sibling's name or short name (`part def <A> Alpha; part def A;`) is reported as `ambiguous-namespace-name` (KerML 7.2.5.2), and a reference by the name they clash on (`A`) is left unresolved rather than taken for either.
+- Keep ambiguous names unresolved in navigation, hover, references, rename,
+  linked editing and hierarchy preparation, including qualified and feature paths.
+  Retain every conflicting declaration when both names of an element clash.
+
 ## [0.38.0]
 
 ### Added

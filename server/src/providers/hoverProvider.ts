@@ -36,6 +36,7 @@ export class HoverProvider {
         // Try to extract the word at hover position (for qualified name lookup)
         const text = this.documentManager.getText(params.textDocument.uri);
         const reference = new NameReferences(this.documentManager).at(params.textDocument.uri, params.position);
+        if (reference?.isAmbiguous) return null;
         const word = reference?.qualifiedName ?? (text
             ? this.getWordAtPosition(text, params.position.line, params.position.character)
             : undefined);
@@ -216,4 +217,3 @@ export class HoverProvider {
         }
     }
 }
-
