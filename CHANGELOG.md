@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Experimental LSP request `sysml/validateText`: validates texts against the workspace model without opening or publishing anything. Disabled by default. Enabled by `sysml.experimental.validateText.enabled`, limited by `maxDocuments` (5), `maxLines` (200), `maxCharacters` (8,192 per document), and `maxTotalCharacters` (16,384 per request). Character limits use UTF-16 code units and are checked before parsing.
+- Benchmark suite for `sysml/validateText`.
+
+### Fixed
+
+- Keep temporary validation versions outside the LSP integer range so they
+  cannot reuse a real document's version or its cached diagnostics.
+
 ## [0.37.0]
 
 ### Fixed

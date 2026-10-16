@@ -94,7 +94,7 @@ function printHelp(): void {
 SysML v2 LSP Benchmark Runner
 
 Options:
-  --suite <name>     Run specific suite (parse|symbolTable|providers|memory|throughput|folderLoad)
+  --suite <name>     Run specific suite (parse|symbolTable|providers|memory|throughput|folderLoad|validateText)
                      Can be repeated. Default: all suites.
   --baseline         Save current results as the baseline for regression comparison.
   --compare          Compare against saved baseline and exit 1 on regression.
@@ -116,6 +116,8 @@ const SUITE_RUNNERS: Record<string, SuiteRunner> = {
     memory: runMemorySuite,
     throughput: runThroughputSuite,
     folderLoad: runFolderLoadSuite,
+    // The CI baseline may predate this provider.
+    validateText: async opts => (await import('./suites/validateText.bench.js')).runValidateTextSuite(opts),
 };
 
 const ALL_SUITES = Object.keys(SUITE_RUNNERS);
