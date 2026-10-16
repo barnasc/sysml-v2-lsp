@@ -322,6 +322,134 @@ package Test {
             expect(messages).toEqual(["Type 'Missing Unit' is not defined in the current document or standard library"]);
         });
 
+        it.each([
+            ['unquoted', 'R0'],
+            ['quoted', "'R0'"],
+        ])('should resolve a local short name, %s, as a subsetting, typing and qualified', async (_case, ref) => {
+            const text = `
+package P {
+    attribute def Unit;
+    attribute <R0> unit : Unit;
+    attribute def <UD> UnitDef;
+    attribute narrower :> ${ref};
+    attribute qualified :> P::${ref};
+    attribute typed : UD;
+    attribute typedQualified : P::'UD';
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            expect(diags.filter(d => d.code === 'unresolved-type').map(d => d.message)).toEqual([]);
+        });
+
+        it('should resolve a short name brought in by a namespace or membership import', async () => {
+            const text = `
+package Units {
+    attribute def Unit;
+    attribute <R0> unit : Unit;
+    attribute <R1> other : Unit;
+}
+package UsesNamespace {
+    private import Units::*;
+    attribute x :> R0;
+}
+package UsesMembership {
+    private import Units::R1;
+    attribute y :> R1;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            expect(diags.filter(d => d.code === 'unresolved-type').map(d => d.message)).toEqual([]);
+        });
+
+        it('should still flag a short name of another namespace that is not imported', async () => {
+            const text = `
+package Units {
+    attribute def Unit;
+    attribute <R0> unit : Unit;
+}
+package Other {
+    attribute x :> R0;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const messages = diags.filter(d => d.code === 'unresolved-type').map(d => d.message);
+            expect(messages).toEqual(["Type 'R0' is not defined in the current document or standard library"]);
+        });
+
+        it('should flag a short name that is not distinguishable from a sibling\'s name (KerML 7.2.5.2)', async () => {
+            const text = `
+package P {
+    part def <A> Alpha;
+    part def A;
+    part def <B> Beta;
+    part def <B> Gamma;
+    part def <C> Delta;
+    part def C;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const names = diags.filter(d => d.code === 'ambiguous-namespace-name').map(d => d.data.name).sort();
+            expect(names).toEqual(['A', 'Alpha', 'Beta', 'C', 'Delta', 'Gamma']);
+        });
+
+        it('should leave a name two declarations clash on through a short name unresolved, and their other names resolved', async () => {
+            const text = `
+package Outer {
+    attribute def B;
+    package P {
+        attribute def <A> Alpha;
+        attribute def A;
+        attribute def <B> Beta;
+        attribute def <B> Gamma;
+        attribute inside : B;
+    }
+    package Q {
+        private import P::*;
+        attribute a : A;
+        attribute b : B;
+        attribute qualified : P::B;
+        attribute alpha : Alpha;
+        attribute gamma : P::Gamma;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const messages = diags.filter(d => d.code === 'unresolved-type').map(d => d.message);
+            expect(messages).toEqual([
+                "Type 'B' is not defined in the current document or standard library",
+                "Type 'A' is not defined in the current document or standard library",
+                "Type 'B' is not defined in the current document or standard library",
+                "Type 'P::B' is not defined in the current document or standard library",
+            ]);
+        });
+
+        it('should resolve a clashing short name imported on its own by membership', async () => {
+            const text = `
+package P {
+    attribute def <B> Beta;
+    attribute def <B> Gamma;
+}
+package Q {
+    private import P::Beta;
+    attribute b : B;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            expect(diags.filter(d => d.code === 'unresolved-type').map(d => d.message)).toEqual([]);
+        });
+
+        it('should not flag a short name equal to its own element\'s name, or one of an element of another kind', async () => {
+            const text = `
+package P {
+    part def <Same> Same;
+    part def <Q> Quux;
+    attribute def Q;
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            expect(diags.filter(d => d.code === 'ambiguous-namespace-name')).toEqual([]);
+        });
+
         it('should not read a colon inside a quoted name as a typing', async () => {
             const text = `
 package QuotedColonName {
