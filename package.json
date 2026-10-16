@@ -96,6 +96,26 @@
           "default": [],
           "description": "Diagnostic codes to suppress, such as missing-doc. Changes apply to open documents immediately."
         },
+        "sysml.experimental.validateText.enabled": {
+          "scope": "window",
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Experimental: answer the custom `sysml/validateText` request, which validates SysML text against the workspace model without opening a document or publishing diagnostics. The request is meant for tools that generate or edit SysML text."
+        },
+        "sysml.experimental.validateText.maxDocuments": {
+          "scope": "window",
+          "type": "integer",
+          "minimum": 1,
+          "default": 5,
+          "markdownDescription": "Experimental: the most documents one `sysml/validateText` request may validate. Requests with more are rejected."
+        },
+        "sysml.experimental.validateText.maxLines": {
+          "scope": "window",
+          "type": "integer",
+          "minimum": 1,
+          "default": 200,
+          "markdownDescription": "Experimental: the most lines of code one document's text may have in a `sysml/validateText` request. Requests with a longer text are rejected. Bounds how long one request keeps the server busy."
+        },
         "sysml.maxNumberOfProblems": {
           "scope": "resource",
           "type": "number",

@@ -214,6 +214,25 @@ function renderFolderLoadSuite(suite: SuiteReport): string {
     return lines.join('\n');
 }
 
+function renderValidateTextSuite(suite: SuiteReport): string {
+    const lines: string[] = [
+        `## validateText`,
+        '',
+        `| Request | Documents | Lines | Characters | Median | p95 | CV |`,
+        `| --- | ---: | ---: | ---: | ---: | ---: | ---: |`,
+    ];
+
+    for (const r of suite.results) {
+        lines.push(
+            `| ${r.name} | ${r.meta?.documents ?? '–'} | ${r.meta?.lines ?? '–'} | ${r.meta?.characters ?? '–'} ` +
+            `| ${fmt(r.stats.median)} | ${fmt(r.stats.p95)} | ${coefficient(r)} |`
+        );
+    }
+
+    lines.push('');
+    return lines.join('\n');
+}
+
 function renderGenericSuite(suite: SuiteReport): string {
     const lines: string[] = [
         `## ${suite.name}`,
@@ -250,6 +269,7 @@ const SUITE_RENDERERS: Record<string, (suite: SuiteReport) => string> = {
     memory: renderMemorySuite,
     throughput: renderThroughputSuite,
     folderLoad: renderFolderLoadSuite,
+    validateText: renderValidateTextSuite,
 };
 
 // ── Public API ──────────────────────────────────────────────────────

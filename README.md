@@ -159,7 +159,7 @@ make bench-history    # Stable historical benchmark trends
 
 ## Benchmarks
 
-A built-in benchmark suite measures parser, symbol table, LSP provider, memory, throughput, and folder-load performance. Results are written as both JSON and Markdown to `benchmarks/results/`.
+A built-in benchmark suite measures parser, symbol table, LSP provider, memory, throughput, folder-load, and `sysml/validateText` performance. Results are written as both JSON and Markdown to `benchmarks/results/`.
 
 ### Running Benchmarks
 
@@ -182,6 +182,7 @@ npm run bench:history                                # stable historical trends
 | `memory`      | Forced-GC retained-heap estimates; use for coarse trends, not precise allocation counts |
 | `throughput`  | Syntax-valid lexer/parser throughput, including document-level stale-snapshot recovery  |
 | `folderLoad`  | Workspace-style file discovery, parse, and symbol build                                 |
+| `validateText` | Main-thread time of a `sysml/validateText` request by workspace, text and request size, and the rebuild it leaves for the next request |
 
 ### Regression Detection
 

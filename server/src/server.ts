@@ -54,7 +54,7 @@ import { ReferencesProvider } from './providers/referencesProvider.js';
 import { RenameProvider } from './providers/renameProvider.js';
 import { SemanticTokensProvider, tokenModifiers, tokenTypes } from './providers/semanticTokensProvider.js';
 import { SemanticValidator } from './providers/semanticValidator.js';
-import { TextValidationProvider, type ValidateTextParams, type ValidateTextResult } from './providers/textValidationProvider.js';
+import { readTextValidationSettings, TextValidationProvider, type ValidateTextParams, type ValidateTextResult } from './providers/textValidationProvider.js';
 import { isInFolder, isSameDocumentUri } from './utils/documentUri.js';
 import { DEFAULT_SKIP_DIRS, findSysMLFilesAsync, readFilesBatch } from './utils/fileDiscovery.js';
 import { DEFAULT_URL_PREFIX, type FolderProjectId, getUrlPrefix, setFolderProjectIds, setProjectId } from './utils/uuid.js';
@@ -94,7 +94,7 @@ const renameProvider = new RenameProvider(documentManager);
 const codeActionProvider = new CodeActionProvider(documentManager);
 const formattingProvider = new FormattingProvider(documents);
 const semanticValidator = new SemanticValidator(documentManager);
-const textValidationProvider = new TextValidationProvider(documentManager, semanticValidator);
+const textValidationProvider = new TextValidationProvider(documentManager, semanticValidator, isReported);
 
 // Share the server-level semantic validator with hover so it reuses cached indexes.
 hoverProvider.setSemanticValidator(semanticValidator);
@@ -120,12 +120,13 @@ let preloadOnOpen: 'always' | 'workspaceOnly' | 'never' = 'workspaceOnly';
 
 let disabledDiagnosticCodes: ReadonlySet<string> = new Set();
 
+/** Whether `diagnostic` is reported to the client: its code isn't in `sysml.validation.disabledCodes`. */
+function isReported(diagnostic: Diagnostic): boolean {
+    return diagnostic.code === undefined || !disabledDiagnosticCodes.has(String(diagnostic.code));
+}
+
 function publishDiagnostics(uri: string, diagnostics: Diagnostic[]): void {
-    connection.sendDiagnostics({
-        uri,
-        diagnostics: diagnostics.filter(diagnostic => diagnostic.code === undefined
-            || !disabledDiagnosticCodes.has(String(diagnostic.code))),
-    });
+    connection.sendDiagnostics({ uri, diagnostics: diagnostics.filter(isReported) });
 }
 
 /** User-configurable set of directory names to skip during workspace scan. */
@@ -504,6 +505,8 @@ async function pullSettings(): Promise<void> {
     const codes: unknown = validation?.disabledCodes;
     disabledDiagnosticCodes = new Set(Array.isArray(codes)
         ? codes.filter((code): code is string => typeof code === 'string') : []);
+    const experimental = await connection.workspace.getConfiguration('sysml.experimental');
+    textValidationProvider.configure(readTextValidationSettings(experimental?.validateText));
 }
 
 /**
@@ -1109,9 +1112,10 @@ connection.onRequest('sysml/elementLookup', async (params: SysMLElementLookupPar
 });
 
 /**
- * `sysml/validateText` — validates text fragments against the elaborated
- * model without opening a document or publishing diagnostics; see
- * `TextValidationProvider`.
+ * `sysml/validateText` (experimental) — validates text fragments against
+ * the elaborated model without opening a document or publishing
+ * diagnostics; see `TextValidationProvider`. Answered only when
+ * `sysml.experimental.validateText.enabled` is set, within its limits.
  */
 connection.onRequest('sysml/validateText', async (params: ValidateTextParams): Promise<ValidateTextResult> => {
     await initialization;

@@ -22,8 +22,13 @@ export class DocumentManager {
      * indexed yet" apart from "genuinely doesn't exist".
      */
     private workspaceScanComplete = true;
-    /** Last version given to a stand-in document by `withTexts` (negative, counting down). */
-    private temporaryVersion = 0;
+    /**
+     * Last version given to a stand-in text by `withTexts`. Caches keyed by
+     * version assume one text per uri and version, so each stand-in gets a
+     * version no real document has: counting down from the largest LSP
+     * integer (not negative, which means "no such document").
+     */
+    private temporaryVersion = 2 ** 31;
 
     /**
      * Parse a document and cache the result.
@@ -260,9 +265,9 @@ export class DocumentManager {
      * added as a new document), all at once, then restores the previous
      * state. `fn` must be synchronous: no other request can run in between,
      * so no other request ever sees the temporary texts. Every text is
-     * parsed before anything changes. The stand-ins get negative versions
-     * no real document has, so caches keyed by version never confuse them
-     * with the real documents.
+     * parsed before anything changes. The stand-ins get versions no real
+     * document has, so caches keyed by version never confuse them with the
+     * real documents.
      */
     withTexts<T>(documents: readonly { uri: string; text: string }[], fn: () => T): T {
         const parsed = documents.map(({ uri, text }) => ({ uri, text, result: parseDocument(text) }));

@@ -4,7 +4,8 @@
 
 ### Added
 
-- Custom LSP request `sysml/validateText` (`{ documents: [{ uri, text }] }`): validates one or more texts together against the elaborated model, as if each were the content of its `uri`'s document, and reports each text's diagnostics, without opening, publishing or changing anything.
+- Experimental LSP request `sysml/validateText`: validates texts against the workspace model without opening or publishing anything. Enabled by `sysml.experimental.validateText.enabled`, limited by `maxDocuments` (5) and `maxLines` (200).
+- Benchmark suite for `sysml/validateText`.
 
 ## [0.36.0]
 

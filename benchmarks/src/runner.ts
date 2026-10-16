@@ -19,6 +19,7 @@ import { runProviderSuite } from './suites/providers.bench.js';
 import { runMemorySuite } from './suites/memory.bench.js';
 import { runThroughputSuite } from './suites/throughput.bench.js';
 import { runFolderLoadSuite } from './suites/folderLoad.bench.js';
+import { runValidateTextSuite } from './suites/validateText.bench.js';
 import { buildReport, writeReport, writeBaseline, loadBaseline, type SuiteReport } from './reporters/jsonReporter.js';
 import { writeMarkdownReport } from './reporters/markdownReporter.js';
 import { compareReports, formatRegressionSummary } from './utils/regression.js';
@@ -94,7 +95,7 @@ function printHelp(): void {
 SysML v2 LSP Benchmark Runner
 
 Options:
-  --suite <name>     Run specific suite (parse|symbolTable|providers|memory|throughput|folderLoad)
+  --suite <name>     Run specific suite (parse|symbolTable|providers|memory|throughput|folderLoad|validateText)
                      Can be repeated. Default: all suites.
   --baseline         Save current results as the baseline for regression comparison.
   --compare          Compare against saved baseline and exit 1 on regression.
@@ -116,6 +117,7 @@ const SUITE_RUNNERS: Record<string, SuiteRunner> = {
     memory: runMemorySuite,
     throughput: runThroughputSuite,
     folderLoad: runFolderLoadSuite,
+    validateText: runValidateTextSuite,
 };
 
 const ALL_SUITES = Object.keys(SUITE_RUNNERS);
