@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.39.0]
+
 ### Fixed
 
 - A short name that clashes with a sibling's name or short name (`part def <A> Alpha; part def A;`) is reported as `ambiguous-namespace-name` (KerML 7.2.5.2), and a reference by the name they clash on (`A`) is left unresolved rather than taken for either.
