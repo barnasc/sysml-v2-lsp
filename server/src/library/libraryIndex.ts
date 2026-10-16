@@ -12,7 +12,9 @@ import { loadLibraryFiles, type LibraryFile } from '../platform/libraryFiles.js'
  * user-specified custom path) for `.sysml` / `.kerml` files.
  */
 
-import { isIdentPart as isWordChar } from '../utils/identUtils.js';
+import {
+    isIdentPart as isWordChar, joinQualifiedName, readNameAt, splitQualifiedName,
+} from '../utils/identUtils.js';
 
 function skipSpaces(line: string, pos: number): number {
     while (pos < line.length && (line[pos] === ' ' || line[pos] === '\t')) pos++;
@@ -27,71 +29,38 @@ function readWord(line: string, pos: number): [string, number] | undefined {
     return pos > start ? [line.slice(start, pos), pos] : undefined;
 }
 
-/** Read a name that may be wrapped in single quotes ('Name') or angle brackets (<shortName>). */
+/** Read a basic or unrestricted name (SysML 7.2.2), without its quote delimiters. */
+function readSimpleName(line: string, pos: number): [string, number] | undefined {
+    const name = readNameAt(line, skipSpaces(line, pos));
+    return name ? [name.name, name.end] : undefined;
+}
+
+/** Read a name or <shortName>, skipping the optional long name after a short name. */
 function readName(line: string, pos: number): [string, number] | undefined {
     pos = skipSpaces(line, pos);
-    if (pos < line.length && line[pos] === "'") {
-        pos++;
-        const start = pos;
-        while (pos < line.length && isWordChar(line.charCodeAt(pos))) pos++;
-        const name = line.slice(start, pos);
-        if (pos < line.length && line[pos] === "'") pos++;
-        return name ? [name, pos] : undefined;
-    }
-    // Handle <shortName> syntax — index the short name and skip past the
-    // optional long name that follows (quoted or unquoted).
-    // e.g. `<knot> 'knot (nautical mile per hour)'` or `<kg> kilogram`
     if (pos < line.length && line[pos] === '<') {
-        pos++;
-        const start = pos;
-        while (pos < line.length && line[pos] !== '>') pos++;
-        const shortName = line.slice(start, pos).trim();
-        if (pos < line.length && line[pos] === '>') pos++;
-        // Skip optional long name after the short name
-        pos = skipSpaces(line, pos);
-        if (pos < line.length && line[pos] === "'") {
-            // Quoted long name — skip to closing quote
-            pos++;
-            while (pos < line.length && line[pos] !== "'") pos++;
-            if (pos < line.length) pos++;
-        } else if (pos < line.length && isWordChar(line.charCodeAt(pos))) {
-            // Unquoted long name (e.g. `<kg> kilogram`)
-            while (pos < line.length && isWordChar(line.charCodeAt(pos))) pos++;
-        }
-        return shortName ? [shortName, pos] : undefined;
+        const short = readSimpleName(line, pos + 1);
+        if (!short) return undefined;
+        pos = skipSpaces(line, short[1]);
+        if (line[pos] !== '>') return undefined;
+        const long = readSimpleName(line, pos + 1);
+        return [short[0], long?.[1] ?? pos + 1];
     }
-    return readWord(line, pos);
+    return readSimpleName(line, pos);
 }
 
 /**
  * Extract the long name from a `<shortName> longName` or `<shortName> 'longName'` pattern.
- * Returns the single-word long name (e.g. `foot` from `'foot'`, `kilogram` from `kilogram`)
- * or undefined if the long name is multi-word or absent.
+ * Returns the complete long name, or undefined if absent.
  */
 function readLongName(line: string, pos: number): string | undefined {
     pos = skipSpaces(line, pos);
     if (pos >= line.length || line[pos] !== '<') return undefined;
-    // Skip past <shortName>
-    while (pos < line.length && line[pos] !== '>') pos++;
-    if (pos < line.length) pos++;
-    pos = skipSpaces(line, pos);
-    if (pos >= line.length) return undefined;
-    if (line[pos] === "'") {
-        // Quoted long name
-        pos++;
-        const start = pos;
-        while (pos < line.length && line[pos] !== "'") pos++;
-        const longName = line.slice(start, pos).trim();
-        if (longName && /^[A-Za-z_]\w*$/.test(longName)) return longName;
-        return undefined;
-    }
-    // Unquoted long name (e.g. `<kg> kilogram`)
-    if (isWordChar(line.charCodeAt(pos))) {
-        const start = pos;
-        while (pos < line.length && isWordChar(line.charCodeAt(pos))) pos++;
-        return line.slice(start, pos);
-    }
-    return undefined;
+    const short = readSimpleName(line, pos + 1);
+    if (!short) return undefined;
+    pos = skipSpaces(line, short[1]);
+    if (line[pos] !== '>') return undefined;
+    return readSimpleName(line, pos + 1)?.[0];
 }
 
 /** Check if the word at pos matches the given keyword (followed by non-word char or end). */
@@ -157,7 +126,7 @@ function extractPackageNameFromHead(head: string): string | undefined {
         }
 
         // Read the package name
-        const w = readWord(line, pos);
+        const w = readName(line, pos);
         if (w) return w[0];
     }
     return undefined;
@@ -369,7 +338,7 @@ function indexLibraryFile(
             }
             // Also index qualified form: Pkg::name
             if (pkgName) {
-                const qualName = `${pkgName}::${usageName}`;
+                const qualName = joinQualifiedName([pkgName, usageName]);
                 if (!types.has(qualName)) {
                     types.set(qualName, { uri: fileUri, line: i });
                 }
@@ -382,7 +351,7 @@ function indexLibraryFile(
                     types.set(longName, { uri: fileUri, line: i });
                 }
                 if (pkgName) {
-                    const qualLong = `${pkgName}::${longName}`;
+                    const qualLong = joinQualifiedName([pkgName, longName]);
                     if (!types.has(qualLong)) {
                         types.set(qualLong, { uri: fileUri, line: i });
                     }
@@ -439,7 +408,7 @@ export function initLibraryIndex(serverDir: string, customPath?: string): number
  */
 export function resolveLibraryPackage(name: string): string | undefined {
     if (!index) return undefined;
-    const pkg = name.split('::')[0];
+    const pkg = splitQualifiedName(name)[0];
     return index.get(pkg);
 }
 
@@ -456,14 +425,16 @@ export function resolveLibraryPackage(name: string): string | undefined {
  */
 export function resolveLibraryType(name: string): LibraryTypeLocation | undefined {
     if (!typeIndex) return undefined;
+    const segments = splitQualifiedName(name);
+    name = segments.length === 1 ? segments[0] : joinQualifiedName(segments);
 
     // Try the exact name first (handles both simple and qualified forms)
     const exact = typeIndex.get(name);
     if (exact) return exact;
 
     // For qualified names, try just the member part
-    if (name.includes('::')) {
-        const member = name.split('::').pop()!;
+    if (segments.length > 1) {
+        const member = segments[segments.length - 1];
         return typeIndex.get(member);
     }
 
