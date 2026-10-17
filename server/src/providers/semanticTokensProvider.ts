@@ -47,9 +47,9 @@ const PUNCTUATION_TOKENS = new Set([
 ]);
 
 /**
- * The token index of each flow or message payload type written without a payload name (`of Fuel`,
- * `of [2] Fuel`, 8.2.2.16 `PayloadFeature`): the last token of the payload's own typing. A payload
- * with a name (`of fuel : Fuel`) is typed after `:`, which the context classification handles.
+ * The token index of each flow or message payload type written without a payload name (8.2.2.16
+ * `PayloadFeature`): the last token of the payload's own typing. A payload with a name is typed
+ * after `:`, which the context classification handles.
  */
 function payloadTypeTokenIndices(tree: ParserRuleContext): Set<number> {
     const indices = new Set<number>();

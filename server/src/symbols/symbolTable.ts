@@ -91,8 +91,8 @@ const BODY_RULE_INDICES: ReadonlySet<number> = new Set(
 );
 
 /**
- * A flow's payload (`of i : I`) and ends (`from a to b`), and a message's
- * events: they declare names and types of their own, never the flow's.
+ * A flow's payload and ends, and a message's events: they declare names and
+ * types of their own, never the flow's.
  */
 const FLOW_PART_RULE_INDICES: ReadonlySet<number> = new Set([
     SysMLv2Parser.RULE_payloadFeatureMember,
@@ -1127,7 +1127,7 @@ export class SymbolTable {
         const declaration = this.flowDeclarationOf(ctx);
         if (!declaration) return undefined;
 
-        // A flow's ends (`from a.out to b.in`), or a message's source and target events.
+        // A flow's ends, or a message's source and target events.
         const flowEnds: ParserRuleContext[] = [];
         this.collectDescendantRules(declaration, SysMLv2Parser.RULE_flowEndMember, flowEnds);
         this.collectDescendantRules(declaration, SysMLv2Parser.RULE_messageEventMember, flowEnds);
@@ -1159,7 +1159,7 @@ export class SymbolTable {
 
     /**
      * A flow payload's own types (8.2.2.16 `PayloadFeature`), as written: its typings only, never a
-     * feature it subsets or redefines (`of p :> q`).
+     * feature it subsets or redefines.
      */
     private extractPayloadTypeNames(payload: ParserRuleContext): string[] {
         const typings: ParserRuleContext[] = [];
