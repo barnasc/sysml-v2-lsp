@@ -24,6 +24,7 @@ import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
 import { SysMLv2Parser } from '../generated/SysMLv2Parser.js';
 import { clearAllDFAStates, hasStaleDfaStates, isDfaPreSeeded, loadDFASnapshot, markDfaNotPreSeeded } from './dfaLoader.js';
 import { SysMLErrorListener } from './errorListener.js';
+import { keywordAsNameMessage, NAME_PRECEDING_KEYWORDS } from './keywordAsName.js';
 import { EMPTY_NAME_MESSAGE, isEmptyName } from '../utils/emptyNames.js';
 import { WARMUP_TEXT } from './warmupText.js';
 import { normalizeUtf16Columns } from './positionUtils.js';
@@ -164,79 +165,6 @@ function findClosestKeyword(identifier: string): string | undefined {
 const KEYWORD_CONTINUATIONS: ReadonlySet<number> = new Set([
     SysMLv2Lexer.IDENTIFIER, SysMLv2Lexer.COLON, SysMLv2Lexer.DEF,
     SysMLv2Lexer.LBRACE, SysMLv2Lexer.LBRACK, SysMLv2Lexer.ABOUT,
-]);
-
-const NAME_PRECEDING_KEYWORDS: ReadonlySet<number> = new Set([
-    // ── SysML definition/usage element keywords ──
-    SysMLv2Lexer.PART, SysMLv2Lexer.PORT, SysMLv2Lexer.ITEM,
-    SysMLv2Lexer.ATTRIBUTE, SysMLv2Lexer.ACTION, SysMLv2Lexer.CALC,
-    SysMLv2Lexer.STATE, SysMLv2Lexer.CONSTRAINT, SysMLv2Lexer.REQUIREMENT,
-    SysMLv2Lexer.CONCERN, SysMLv2Lexer.CASE, SysMLv2Lexer.ANALYSIS,
-    SysMLv2Lexer.VERIFICATION, SysMLv2Lexer.VIEW, SysMLv2Lexer.VIEWPOINT,
-    SysMLv2Lexer.RENDERING, SysMLv2Lexer.METADATA, SysMLv2Lexer.PACKAGE,
-    SysMLv2Lexer.NAMESPACE, SysMLv2Lexer.ENUM, SysMLv2Lexer.ALLOCATION,
-    SysMLv2Lexer.CONNECTION, SysMLv2Lexer.INTERFACE, SysMLv2Lexer.OCCURRENCE,
-    SysMLv2Lexer.INDIVIDUAL, SysMLv2Lexer.FLOW, SysMLv2Lexer.SUCCESSION,
-    SysMLv2Lexer.BINDING, SysMLv2Lexer.MESSAGE, SysMLv2Lexer.TRANSITION,
-    // ── KerML element keywords ──
-    SysMLv2Lexer.TYPE, SysMLv2Lexer.CLASSIFIER, SysMLv2Lexer.DATATYPE,
-    SysMLv2Lexer.CLASS, SysMLv2Lexer.STRUCT, SysMLv2Lexer.ASSOC,
-    SysMLv2Lexer.METACLASS, SysMLv2Lexer.INTERACTION, SysMLv2Lexer.BEHAVIOR,
-    SysMLv2Lexer.FUNCTION, SysMLv2Lexer.PREDICATE, SysMLv2Lexer.FEATURE,
-    SysMLv2Lexer.CONNECTOR, SysMLv2Lexer.STEP, SysMLv2Lexer.EXPR,
-    SysMLv2Lexer.BOOL, SysMLv2Lexer.INV, SysMLv2Lexer.MULTIPLICITY,
-    // ── Annotation / membership keywords ──
-    SysMLv2Lexer.ALIAS, SysMLv2Lexer.COMMENT, SysMLv2Lexer.DOC,
-    SysMLv2Lexer.REP, SysMLv2Lexer.DEPENDENCY, SysMLv2Lexer.IMPORT,
-    // ── Keyword + DEF / keyword modifiers ──
-    SysMLv2Lexer.DEF, SysMLv2Lexer.REF, SysMLv2Lexer.ALL,
-    // ── Feature prefix / visibility modifiers ──
-    SysMLv2Lexer.ABSTRACT, SysMLv2Lexer.VARIATION, SysMLv2Lexer.DERIVED,
-    SysMLv2Lexer.COMPOSITE, SysMLv2Lexer.CONST, SysMLv2Lexer.CONSTANT,
-    SysMLv2Lexer.VAR, SysMLv2Lexer.MEMBER, SysMLv2Lexer.RETURN,
-    SysMLv2Lexer.PUBLIC, SysMLv2Lexer.PRIVATE, SysMLv2Lexer.PROTECTED,
-    // ── Directionality ──
-    SysMLv2Lexer.IN, SysMLv2Lexer.OUT, SysMLv2Lexer.INOUT, SysMLv2Lexer.END,
-    // ── Actor / role keywords ──
-    SysMLv2Lexer.ACTOR, SysMLv2Lexer.STAKEHOLDER, SysMLv2Lexer.SUBJECT,
-    SysMLv2Lexer.VARIANT, SysMLv2Lexer.SNAPSHOT, SysMLv2Lexer.TIMESLICE,
-    // ── Action control node keywords ──
-    SysMLv2Lexer.FORK, SysMLv2Lexer.JOIN, SysMLv2Lexer.MERGE,
-    SysMLv2Lexer.DECIDE,
-    // ── Reference-preceding keywords ──
-    SysMLv2Lexer.PERFORM, SysMLv2Lexer.EXHIBIT, SysMLv2Lexer.INCLUDE,
-    SysMLv2Lexer.SATISFY, SysMLv2Lexer.ASSERT, SysMLv2Lexer.VERIFY,
-    SysMLv2Lexer.RENDER, SysMLv2Lexer.CONNECT, SysMLv2Lexer.ALLOCATE,
-    SysMLv2Lexer.BIND, SysMLv2Lexer.EXPOSE, SysMLv2Lexer.EVENT,
-    // ── Succession / flow keywords ──
-    SysMLv2Lexer.FIRST, SysMLv2Lexer.THEN, SysMLv2Lexer.TO,
-    SysMLv2Lexer.FROM,
-    // ── Relationship keywords ──
-    SysMLv2Lexer.REDEFINES, SysMLv2Lexer.SUBSETS,
-    SysMLv2Lexer.SPECIALIZES, SysMLv2Lexer.REFERENCES,
-    SysMLv2Lexer.CONJUGATES, SysMLv2Lexer.CHAINS, SysMLv2Lexer.CROSSES,
-    SysMLv2Lexer.UNIONS, SysMLv2Lexer.INTERSECTS, SysMLv2Lexer.DIFFERENCES,
-    // ── KerML relationship element keywords ──
-    SysMLv2Lexer.SPECIALIZATION, SysMLv2Lexer.CONJUGATION,
-    SysMLv2Lexer.DISJOINING, SysMLv2Lexer.INVERTING,
-    SysMLv2Lexer.FEATURING, SysMLv2Lexer.TYPING, SysMLv2Lexer.REDEFINITION,
-    SysMLv2Lexer.SUBTYPE, SysMLv2Lexer.SUBCLASSIFIER,
-    SysMLv2Lexer.SUBSET, SysMLv2Lexer.CONJUGATE,
-    SysMLv2Lexer.DISJOINT, SysMLv2Lexer.INVERSE,
-    // ── Requirement / state body keywords ──
-    SysMLv2Lexer.ASSUME, SysMLv2Lexer.REQUIRE, SysMLv2Lexer.FRAME,
-    SysMLv2Lexer.OBJECTIVE, SysMLv2Lexer.ENTRY, SysMLv2Lexer.DO,
-    SysMLv2Lexer.EXIT,
-    // ── Misc keywords preceding names ──
-    SysMLv2Lexer.ACCEPT, SysMLv2Lexer.SEND, SysMLv2Lexer.ASSIGN,
-    SysMLv2Lexer.TERMINATE, SysMLv2Lexer.FOR, SysMLv2Lexer.ABOUT,
-    SysMLv2Lexer.BY, SysMLv2Lexer.FILTER, SysMLv2Lexer.NEW,
-    SysMLv2Lexer.META, SysMLv2Lexer.OF,
-    // ── Punctuation that precedes names ──
-    SysMLv2Lexer.COLON, SysMLv2Lexer.COLON_GT, SysMLv2Lexer.COLON_GT_GT,
-    SysMLv2Lexer.COLON_COLON, SysMLv2Lexer.COLON_COLON_GT,
-    SysMLv2Lexer.GT, SysMLv2Lexer.FAT_ARROW, SysMLv2Lexer.TILDE,
-    SysMLv2Lexer.COMMA, SysMLv2Lexer.HASH, SysMLv2Lexer.AT,
 ]);
 
 interface SerializedDiagnostic {
@@ -470,9 +398,9 @@ const BOUNDARY_TOKENS = new Set([
  * visible token is an identifier that isn't a keyword, relocate the error
  * to that identifier — it's almost certainly the real problem.
  *
- * Also detects when a reserved keyword is used where an identifier name
- * is expected (e.g. `part frame`) and produces a clear message instead
- * of ANTLR's cryptic "no viable alternative at input 'partframe'".
+ * Also detects a reserved keyword used as a name (e.g. `part frame`,
+ * `keywordAsNameMessage`) and produces a clear message instead of ANTLR's
+ * cryptic "no viable alternative at input 'partframe'".
  *
  * Accepts a pre-built visible token array + position index to avoid
  * redundant filtering and O(n) linear searches.
@@ -491,31 +419,12 @@ function improveErrorLocations(
 
         const errToken = visible[errIdx];
 
-        // ── Keyword-as-identifier detection ──
-        // If the error token is a keyword where a name was expected,
-        // produce a clear "reserved keyword" message.
-        // In the SysML grammar, every alphabetic token that isn't IDENTIFIER
-        // is a keyword — no need to maintain a separate keyword list.
-        if (errToken.type !== SysMLv2Lexer.IDENTIFIER &&
-            errToken.type !== Token.EOF &&
-            errToken.text &&
-            /^[a-z]+$/.test(errToken.text)) {
-            const word = errToken.text;
-            const suggestion = 'my' + word.charAt(0).toUpperCase() + word.slice(1);
-            if (errIdx > 0 && NAME_PRECEDING_KEYWORDS.has(visible[errIdx - 1].type)) {
-                return {
-                    line: err.line,
-                    column: err.column,
-                    length: word.length,
-                    message: `'${word}' is a reserved SysML keyword and cannot be used as a name. Consider renaming it (e.g., '${suggestion}').`,
-                };
-            }
-            return {
-                line: err.line,
-                column: err.column,
-                length: word.length,
-                message: `'${word}' is a reserved SysML keyword and cannot be used as an identifier here.`,
-            };
+        // ── Keyword-as-name detection ──
+        // A reserved keyword used as a name gets a clear message; any other
+        // misplaced keyword keeps the parser's own message.
+        const keywordMessage = keywordAsNameMessage(visible[errIdx - 1], errToken, visible[errIdx + 1]);
+        if (keywordMessage) {
+            return { line: err.line, column: err.column, length: errToken.text!.length, message: keywordMessage };
         }
 
         // ── Boundary token relocation ──

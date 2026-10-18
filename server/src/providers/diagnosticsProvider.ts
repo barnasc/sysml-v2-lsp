@@ -1,7 +1,8 @@
+import { CommonTokenStream, Token } from 'antlr4ng';
 import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver/node';
 import { DocumentManager } from '../documentManager.js';
 import { SyntaxError } from '../parser/errorListener.js';
-import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
+import { keywordAsNameMessage } from '../parser/keywordAsName.js';
 import { stripComments } from '../utils/identUtils.js';
 
 /**
@@ -79,26 +80,21 @@ export class DiagnosticsProvider {
                     continue;
                 }
             }
-            diagnostics.push(this.syntaxErrorToDiagnostic(error));
+            diagnostics.push(this.syntaxErrorToDiagnostic(error, result.tokenStream));
         }
 
         return diagnostics;
     }
 
-    private syntaxErrorToDiagnostic(error: SyntaxError): Diagnostic {
-        let message = error.message;
-
-        // Improve "no viable alternative" / "mismatched input" messages
-        // when a reserved keyword is used where an identifier was expected.
+    private syntaxErrorToDiagnostic(error: SyntaxError, tokenStream: CommonTokenStream): Diagnostic {
+        // A reserved keyword used as a name gets a clear message; any other
+        // misplaced keyword keeps the parser's own message.
         const token = error.offendingSymbol;
-        if (token &&
-            token.type !== SysMLv2Lexer.IDENTIFIER &&
-            token.text &&
-            /^[a-z]+$/.test(token.text)) {
-            const word = token.text;
-            const suggestion = 'my' + word.charAt(0).toUpperCase() + word.slice(1);
-            message = `'${word}' is a reserved SysML keyword and cannot be used as a name. Consider renaming it (e.g., '${suggestion}').`;
-        }
+        const message = (token && keywordAsNameMessage(
+            this.visibleNeighbour(tokenStream, token.tokenIndex, -1),
+            token,
+            this.visibleNeighbour(tokenStream, token.tokenIndex, 1),
+        )) ?? error.message;
 
         return {
             severity: DiagnosticSeverity.Error,
@@ -109,6 +105,15 @@ export class DiagnosticsProvider {
             message,
             source: 'sysml',
         };
+    }
+
+    /** The nearest default-channel token before (`step` -1) or after (`step` 1) `index`. */
+    private visibleNeighbour(tokenStream: CommonTokenStream, index: number, step: -1 | 1): Token | undefined {
+        const tokens = tokenStream.getTokens();
+        for (let i = index + step; i >= 0 && i < tokens.length; i += step) {
+            if (tokens[i].channel === Token.DEFAULT_CHANNEL) return tokens[i];
+        }
+        return undefined;
     }
 
     /**
