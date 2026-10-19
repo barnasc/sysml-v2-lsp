@@ -1571,3 +1571,23 @@ describe('Hover on an anonymous typed usage', () => {
         ]);
     });
 });
+
+describe('parameters without a kind keyword', () => {
+    const uri = 'test://test.sysml';
+    const text = `package Demo {
+    part def A;
+    action user {
+        action p1 { out o : A; }
+        action p2 { in i : A; }
+        flow p1.o to p2.i;
+    }
+}
+`;
+
+    it('goes to a parameter from a flow end that names it', async () => {
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { dm } = await setup(text, uri);
+        const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 5, character: 16 } });
+        expect(location?.range.start).toEqual({ line: 3, character: 24 });
+    });
+});

@@ -1372,11 +1372,11 @@ export class SymbolTable {
 
     /**
      * The declaration (`SysMLSymbol.declaration`) of a definition or usage
-     * without a declared name, as written. Undefined for any other
-     * element, and for an untyped transition without a source and target
-     * state. Its name is empty; it is identified by its `symbolId`. A
-     * reference usage's may be empty (`{ ... }`, 8.2.2.6.3): it still owns
-     * the members of its body.
+     * without a declared name, as written; its name is empty and it is
+     * identified by its `symbolId`. Undefined, so no symbol, for any other
+     * element and for an untyped transition without a source and target
+     * state. A reference usage's may be empty, `{ ... }` or a lone `;`
+     * (8.2.2.2, 8.2.2.6.2-8.2.2.6.3), and still gives it a symbol.
      */
     private anonymousDeclaration(
         ctx: ParserRuleContext,

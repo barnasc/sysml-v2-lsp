@@ -1832,6 +1832,157 @@ package Demo {
         expect(result.errors.length).toBeGreaterThan(0);
         expect(st.getAllSymbols().filter(s => s.kind === 'ref')).toEqual([]);
     });
+
+    it('should read every declaration form of a usage without a kind keyword', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    private import ScalarValues::*;
+    part def A;
+    part def B { attribute mass : Real; x : A; }
+    part b2 : B {
+        :>> mass = 1500;
+        redefines x;
+        <s1> short : A;
+        multi[2] : A;
+        sub :> x;
+        abstract constant c1 : A;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const members = st.getSymbolsForUri('test://test.sysml').filter(s => st.getOwner(s)?.qualifiedName === 'Demo::b2');
+        expect(members.map(s => [s.name, s.kind, s.shortName, s.typeNames, s.multiplicity])).toEqual([
+            // As for any usage kind, a `:>>` redefinition is also listed with the type names.
+            ['mass', 'ref', undefined, ['mass'], undefined],
+            ['x', 'ref', undefined, [], undefined],
+            ['short', 'ref', 's1', ['A'], undefined],
+            ['multi', 'ref', undefined, ['A'], '2'],
+            ['sub', 'ref', undefined, ['x'], undefined],
+            ['c1', 'ref', undefined, ['A'], undefined],
+        ]);
+        expect(members.slice(0, 2).map(s => s.redefinedFeatureTargets)).toEqual([['mass'], ['x']]);
+    });
+
+    it('should give a usage without a kind keyword its visibility and documentation', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        private hidden : A;
+        documented : A {
+            doc /* The documented feature. */
+        }
+    }
+}
+`);
+
+        expect(st.findByName('hidden').map(s => s.visibility)).toEqual(['private']);
+        expect(st.findByName('documented')[0].documentation).toContain('The documented feature.');
+    });
+
+    it('should make a named usage without a kind keyword own the members of its body', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        named : A { part inner : A; }
+    }
+}
+`);
+
+        const named = st.findByName('named')[0];
+        expect(st.findByName('inner').map(s => [s.qualifiedName, s.parentId])).toEqual([['Demo::P::named::inner', named.symbolId]]);
+    });
+
+    it('should give calculation and constraint parameters symbols, and a return parameter an anonymous one', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    private import ScalarValues::*;
+    calc def Double {
+        in v : Real;
+        return : Real;
+        v * 2
+    }
+    calc def Half {
+        in w : Real;
+        return h : Real;
+        w / 2
+    }
+    constraint def Limit {
+        in m : Real;
+        m < 2000
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const refs = st.getAllSymbols().filter(s => s.kind === 'ref').sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(refs.map(s => [st.getOwner(s)?.name, s.name, displayName(s), s.typeNames])).toEqual([
+            ['Double', 'v', 'v', ['Real']],
+            ['Double', '', ': Real', ['Real']],
+            ['Half', 'w', 'w', ['Real']],
+            ['Half', 'h', 'h', ['Real']],
+            ['Limit', 'm', 'm', ['Real']],
+        ]);
+    });
+
+    it('should not read enumerated values, successions, state actions or result expressions as usages', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    private import ScalarValues::*;
+    part def B { attribute mass : Real; }
+    enum def Color { red; green; }
+    state def S {
+        entry; then off;
+        state off;
+    }
+    action def Seq {
+        action a1;
+        action a2;
+        first a1 then a2;
+    }
+    requirement def R {
+        subject v : B;
+        require constraint { v.mass < 2000 }
+    }
+    metadata def Tag;
+    #Tag t1 : B;
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        expect(st.getAllSymbols().filter(s => s.kind === 'ref')).toEqual([]);
+    });
+
+    it('should give a lone `;` an anonymous reference usage symbol, an empty usage by the grammar', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        part a : A;;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const refs = st.getAllSymbols().filter(s => s.kind === 'ref');
+        expect(refs.map(s => [isAnonymous(s), displayName(s), st.getOwner(s)?.qualifiedName])).toEqual([[true, 'ref', 'Demo::P']]);
+    });
+
+    it('should give no symbol to a usage right after a token the parser skipped (known limit)', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        part a : A; ) x : A;
+    }
+}
+`);
+
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(st.findByName('x')).toEqual([]);
+    });
 });
 
 describe('concern definitions and usages', () => {
