@@ -1,4 +1,4 @@
-import { ParserRuleContext, TerminalNode, Token } from 'antlr4ng';
+import { ErrorNode, ParserRuleContext, ParseTree, TerminalNode, Token } from 'antlr4ng';
 import { Range } from 'vscode-languageserver/node';
 import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
 import { MultiplicityBoundsContext, OwnedExpressionContext, SysMLv2Parser } from '../generated/SysMLv2Parser.js';
@@ -64,6 +64,9 @@ const RULE_INDEX_TO_KIND = new Map<number, SysMLElementKind>([
     [SysMLv2Parser.RULE_subjectUsage, SysMLElementKind.SubjectUsage],             // 388
     [SysMLv2Parser.RULE_stakeholderUsage, SysMLElementKind.StakeholderUsage],     // 397
     [SysMLv2Parser.RULE_referenceUsage, SysMLElementKind.RefUsage],               // 213
+    // A usage without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`) is a
+    // reference usage, `ref` being optional (7.6.4, 8.2.2.6.3 DefaultReferenceUsage).
+    [SysMLv2Parser.RULE_defaultReferenceUsage, SysMLElementKind.RefUsage],
     [SysMLv2Parser.RULE_interfaceUsage, SysMLElementKind.InterfaceUsage],         // 268
     [SysMLv2Parser.RULE_performActionUsage, SysMLElementKind.PerformActionUsage], // 298
     // A state's `entry`/`do`/`exit` action (`exit action a : A;`, `exit a;`): the
@@ -959,6 +962,11 @@ export class SymbolTable {
         if (kind === undefined) {
             return undefined;
         }
+        // `verify r;` outside a requirement body: the parser drops `verify` and
+        // reads `r;` as a usage without a kind keyword, which was never declared.
+        if (ctx.ruleIndex === SysMLv2Parser.RULE_defaultReferenceUsage && this.followsSkippedTokens(ctx)) {
+            return undefined;
+        }
 
         const range = contextToRange(ctx);
         const transition = kind === SysMLElementKind.TransitionUsage
@@ -976,7 +984,7 @@ export class SymbolTable {
         const specializationPart = declaration === undefined ? undefined
             : this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_featureSpecializationPart)
                 ?? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_subclassificationPart);
-        if (!declaredName && !declaration) {
+        if (!declaredName && declaration === undefined) {
             return undefined;
         }
         const anonymous = !declaredName;
@@ -1061,6 +1069,33 @@ export class SymbolTable {
             importTargets: importTargets && importTargets.length > 0 ? importTargets : undefined,
             filterConditions: filterConditions && filterConditions.length > 0 ? filterConditions : undefined,
         };
+    }
+
+    /**
+     * Whether the token right before `ctx` was skipped by the parser to
+     * recover from a syntax error (an error node), so that `ctx` is the rest
+     * of an invalid statement rather than a declaration of its own.
+     */
+    private followsSkippedTokens(ctx: ParserRuleContext): boolean {
+        for (let node: ParserRuleContext = ctx; node.parent; node = node.parent) {
+            const siblings = node.parent.children;
+            for (let i = siblings.indexOf(node) - 1; i >= 0; i--) {
+                const last = this.lastLeaf(siblings[i]);
+                if (last) return last instanceof ErrorNode;
+            }
+        }
+        return false;
+    }
+
+    /** The last token node of `tree`, if it has any. */
+    private lastLeaf(tree: ParseTree): TerminalNode | undefined {
+        if (tree instanceof TerminalNode) return tree;
+        if (!(tree instanceof ParserRuleContext)) return undefined;
+        for (let i = tree.children.length - 1; i >= 0; i--) {
+            const leaf = this.lastLeaf(tree.children[i]);
+            if (leaf) return leaf;
+        }
+        return undefined;
     }
 
     /**
@@ -1339,7 +1374,9 @@ export class SymbolTable {
      * The declaration (`SysMLSymbol.declaration`) of a definition or usage
      * without a declared name, as written. Undefined for any other
      * element, and for an untyped transition without a source and target
-     * state. Its name is empty; it is identified by its `symbolId`.
+     * state. Its name is empty; it is identified by its `symbolId`. A
+     * reference usage's may be empty (`{ ... }`, 8.2.2.6.3): it still owns
+     * the members of its body.
      */
     private anonymousDeclaration(
         ctx: ParserRuleContext,
@@ -1348,7 +1385,8 @@ export class SymbolTable {
     ): string | undefined {
         if (!isDefinition(kind) && !isUsageKind(kind)) return undefined;
         if (transition && !(transition.source && transition.target) && this.extractTransitionTypeNames(ctx).length === 0) return undefined;
-        return this.declarationText(ctx);
+        const declaration = this.declarationText(ctx);
+        return kind === SysMLElementKind.RefUsage ? declaration ?? '' : declaration;
     }
 
     /**

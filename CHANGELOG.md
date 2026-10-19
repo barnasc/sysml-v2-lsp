@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A usage declared without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`) gets a reference usage symbol, like one declared with `ref` (7.6.4, 8.2.2.6.3 `DefaultReferenceUsage`). This includes an action's or calculation's parameters. An unknown type on it is reported as `unresolved-type`, and a redefinition without a name of its own is named after the feature it redefines.
+- A body without a declaration (`{ part w : A; }`) is an anonymous reference usage owning its members, rather than its members belonging to the enclosing element.
+
 ## [0.39.0]
 
 ### Fixed

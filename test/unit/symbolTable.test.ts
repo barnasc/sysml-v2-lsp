@@ -1738,6 +1738,102 @@ describe('anonymous usages and definitions', () => {
     });
 });
 
+describe('reference usages without `ref`', () => {
+    it('should give a usage without a kind keyword a reference usage symbol, like `ref`', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        ref r : A;
+        x : A;
+        in y : A;
+        out z : A [2];
+        derived d : A;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const members = st.getSymbolsForUri('test://test.sysml').filter(s => st.getOwner(s)?.qualifiedName === 'Demo::P');
+        expect(members.map(s => [s.qualifiedName, s.kind, s.typeNames, s.multiplicity])).toEqual([
+            ['Demo::P::r', 'ref', ['A'], undefined],
+            ['Demo::P::x', 'ref', ['A'], undefined],
+            ['Demo::P::y', 'ref', ['A'], undefined],
+            ['Demo::P::z', 'ref', ['A'], '2'],
+            ['Demo::P::d', 'ref', ['A'], undefined],
+        ]);
+    });
+
+    it('should give an action\'s parameters symbols owned by the action', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    action def Act {
+        in item1 : A;
+        out item2 : A;
+    }
+    action act {
+        inout p : A;
+    }
+}
+`);
+
+        expect(st.getAllSymbols().filter(s => s.kind === 'ref').map(s => s.qualifiedName)).toEqual([
+            'Demo::Act::item1', 'Demo::Act::item2', 'Demo::act::p',
+        ]);
+    });
+
+    it('should name a redefinition without a name of its own after the feature it redefines', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    part def P { x : A; }
+    part q : P {
+        :>> x : A;
+    }
+}
+`);
+
+        const [x] = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::q');
+        expect([x.qualifiedName, x.kind, isAnonymous(x)]).toEqual(['Demo::q::x', 'ref', false]);
+    });
+
+    it('should give a body without a declaration an anonymous reference usage owning its members', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    {
+        part w : A;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const anonymous = st.getAllSymbols().find(s => s.kind === 'ref')!;
+        expect([isAnonymous(anonymous), displayName(anonymous), st.getOwner(anonymous)?.qualifiedName]).toEqual([true, 'ref', 'Demo']);
+        expect(st.findByName('w').map(w => w.parentId)).toEqual([anonymous.symbolId]);
+    });
+
+    it('should not read the rest of an invalid statement as a usage', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    requirement def R;
+    requirement r : R;
+    part sys {
+        verify r;
+    }
+    package Q {
+        import Demo::R;
+    }
+    verify requirement r by sys;
+}
+`);
+
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(st.getAllSymbols().filter(s => s.kind === 'ref')).toEqual([]);
+    });
+});
+
 describe('concern definitions and usages', () => {
     it('should extract concern definitions and usages as namespaces of their own', async () => {
         const { st, result } = await buildST(`

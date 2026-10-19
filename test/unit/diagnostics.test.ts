@@ -241,6 +241,39 @@ package Demo {
         });
     });
 
+    describe('reference usages without `ref`', () => {
+        it('should flag an unknown type on a usage without a kind keyword, including an action parameter', async () => {
+            const text = `
+package Demo {
+    part def P {
+        x : MissingType1;
+    }
+    action def Act {
+        in p : MissingType2;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            const unresolved = diags.filter(d => d.code === 'unresolved-type').map(d => d.message);
+            expect(unresolved.some(m => m.includes("'MissingType1'"))).toBe(true);
+            expect(unresolved.some(m => m.includes("'MissingType2'"))).toBe(true);
+        });
+
+        it('should flag two usages without a kind keyword with the same name as ambiguous', async () => {
+            const text = `
+package Demo {
+    part def A;
+    part def P {
+        x : A;
+        x : A;
+    }
+}
+`;
+            const diags = await getSemanticDiagnostics(text);
+            expect(diags.filter(d => d.code === 'ambiguous-namespace-name' && d.message.includes("'x'"))).toHaveLength(2);
+        });
+    });
+
     describe('unresolved type references', () => {
         it('should flag a type that does not exist in the document', async () => {
             const text = `

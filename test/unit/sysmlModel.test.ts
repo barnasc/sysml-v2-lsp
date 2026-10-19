@@ -310,6 +310,25 @@ package Demo {
             expect(rels.filter(r => r.type === 'verify' && r.source === 'sys' && r.sourceId === undefined)).toHaveLength(1);
         });
 
+        it('should report a usage without a kind keyword as `ref`, and an action\'s parameters as its children', async () => {
+            const model = await getModelForText(`
+package Test {
+    part def A;
+    action def Act {
+        in p1 : A;
+        out p2 : A;
+    }
+}
+`, ['elements', 'relationships']);
+
+            const act = model.elements!.find(e => e.name === 'Test')!.children.find(e => e.name === 'Act')!;
+            expect(act.children.map(c => [c.name, c.type])).toEqual([['p1', 'ref'], ['p2', 'ref']]);
+            expect(model.relationships!.filter(r => r.type === 'typing')).toEqual([
+                expect.objectContaining({ source: 'p1', target: 'A' }),
+                expect.objectContaining({ source: 'p2', target: 'A' }),
+            ]);
+        });
+
         it('should report the workspace\'s symbol IDs, distinct for declarations clashing across documents', async () => {
             const { DocumentManager } = await import('../../server/src/documentManager.js');
             const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
