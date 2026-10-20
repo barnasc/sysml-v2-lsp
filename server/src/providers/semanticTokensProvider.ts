@@ -153,8 +153,8 @@ export class SemanticTokensProvider {
             return 7; // comment
         }
 
-        // Strings
-        if (lexerType === SysMLv2Lexer.STRING || lexerType === SysMLv2Lexer.DOUBLE_STRING) {
+        // Strings: only the double-quoted form is a string literal (KerML 8.2.2.5, STRING_VALUE)
+        if (lexerType === SysMLv2Lexer.DOUBLE_STRING) {
             return 8; // string
         }
 
@@ -178,8 +178,9 @@ export class SemanticTokensProvider {
             return 6; // keyword
         }
 
-        // Identifiers — context-sensitive classification
-        if (lexerType === SysMLv2Lexer.IDENTIFIER) {
+        // Names — context-sensitive classification. A single-quoted name (KerML 8.2.2.3,
+        // UNRESTRICTED_NAME) is a name like a basic one, not a string literal.
+        if (lexerType === SysMLv2Lexer.IDENTIFIER || lexerType === SysMLv2Lexer.STRING) {
             return this.classifyIdentifier(prev);
         }
 
