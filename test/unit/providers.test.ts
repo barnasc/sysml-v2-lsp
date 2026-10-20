@@ -1296,6 +1296,47 @@ describe('Semantic Tokens Provider', () => {
         expect(tokenTypes).toContain(9); // number type
     });
 
+    it('should classify the type after a keyword form of \':\' or \':>\' as a type, like after the symbol', async () => {
+        const { SemanticTokensProvider } = await import('../../server/src/providers/semanticTokensProvider.js');
+        const text = [
+            'package T {',
+            '    part def A;',
+            '    part def B specializes A;',
+            '    part def C :> A;',
+            '    part d defined by A;',
+            '    part e typed by A;',
+            '    part f : A;',
+            '    part g subsets f;',
+            '    part h redefines f;',
+            '}',
+        ].join('\n');
+        const { dm } = await setup(text);
+        const provider = new SemanticTokensProvider(dm);
+        const data = provider.provideSemanticTokens({ textDocument: { uri: 'test://test.sysml' } }).data;
+
+        // Decode (line, character, length, type) quintuples into `text:type` per line.
+        const lines = text.split('\n');
+        const byLine = new Map<number, string[]>();
+        let line = 0;
+        let character = 0;
+        for (let i = 0; i < data.length; i += 5) {
+            line += data[i];
+            character = data[i] === 0 ? character + data[i + 1] : data[i + 1];
+            const token = `${lines[line].substr(character, data[i + 2])}:${data[i + 3]}`;
+            byLine.set(line, [...(byLine.get(line) ?? []), token]);
+        }
+        const last = (lineIndex: number) => byLine.get(lineIndex)!.at(-1);
+        // Token types: 1 = type, 3 = variable.
+        expect(last(2)).toBe('A:1');
+        expect(last(3)).toBe('A:1');
+        expect(last(4)).toBe('A:1');
+        expect(last(5)).toBe('A:1');
+        expect(last(6)).toBe('A:1');
+        // `subsets` and `redefines` name a feature, not a type: it stays a variable.
+        expect(last(7)).toBe('f:3');
+        expect(last(8)).toBe('f:3');
+    });
+
     it('should classify identifiers with variable token type', async () => {
         const { SemanticTokensProvider } = await import('../../server/src/providers/semanticTokensProvider.js');
         const text = 'package Test { part myPart : SomeType; part def SomeType; }';

@@ -113,6 +113,7 @@ export class SemanticTokensProvider {
         const tokens = result.tokenStream.getTokens();
 
         let prevMeaningful: string | undefined;
+        let prevPrevMeaningful: string | undefined;
 
         for (const token of tokens) {
             if (!token.text || token.channel !== 0) {
@@ -120,9 +121,10 @@ export class SemanticTokensProvider {
             }
 
             const text = token.text;
-            const tokenType = this.classifyTokenInContext(text, prevMeaningful, token.type);
+            const tokenType = this.classifyTokenInContext(text, prevMeaningful, prevPrevMeaningful, token.type);
 
-            // Track previous meaningful token for context-sensitive classification
+            // Track the previous two meaningful tokens for context-sensitive classification
+            prevPrevMeaningful = prevMeaningful;
             prevMeaningful = text;
 
             if (tokenType === undefined) {
@@ -147,7 +149,7 @@ export class SemanticTokensProvider {
     /**
      * Classify a token using surrounding context to match tmLanguage scopes.
      */
-    private classifyTokenInContext(text: string, prev: string | undefined, lexerType: number): number | undefined {
+    private classifyTokenInContext(text: string, prev: string | undefined, prevPrev: string | undefined, lexerType: number): number | undefined {
         // Comments
         if (lexerType === SysMLv2Lexer.REGULAR_COMMENT || lexerType === SysMLv2Lexer.SINGLE_LINE_NOTE) {
             return 7; // comment
@@ -180,17 +182,17 @@ export class SemanticTokensProvider {
 
         // Identifiers — context-sensitive classification
         if (lexerType === SysMLv2Lexer.IDENTIFIER) {
-            return this.classifyIdentifier(prev);
+            return this.classifyIdentifier(prev, prevPrev);
         }
 
         return undefined;
     }
 
     /**
-     * Classify an identifier based on the previous meaningful token,
+     * Classify an identifier based on the previous two meaningful tokens,
      * mirroring the tmLanguage patterns for consistent highlighting.
      */
-    private classifyIdentifier(prev: string | undefined): number {
+    private classifyIdentifier(prev: string | undefined, prevPrev: string | undefined): number {
         if (!prev) return 3; // default: variable
 
         // After 'def' → type definition (matches entity.name.type.sysml)
@@ -204,6 +206,12 @@ export class SemanticTokensProvider {
 
         // After ':' or ':>' or ':>>' → type reference (matches entity.name.type.sysml)
         if (prev === ':' || prev === ':>' || prev === ':>>') return 1; // type
+
+        // After the keyword forms of ':' and ':>' naming a type → type reference, like the symbol
+        // (SysML 8.2.2.1: DEFINED_BY = ':' | 'defined' 'by', SPECIALIZES = ':>' | 'specializes';
+        // KerML 8.2.2.1: TYPED_BY = ':' | 'typed' 'by')
+        if (prev === 'specializes') return 1; // type
+        if (prev === 'by' && (prevPrev === 'defined' || prevPrev === 'typed')) return 1; // type
 
         // After 'attribute' → property (matches variable.other.property.sysml)
         if (prev === 'attribute') return 4; // property
