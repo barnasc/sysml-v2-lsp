@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A definition's or usage's members include the ones it inherits (KerML 7.3.2.1, 8.2.3.5.3, 8.3.3.1.10 `Type::inheritedMemberships`): the public and protected members of the types it specializes by typing, subclassification, subsetting or redefinition, less the features redefined there. An owned member comes first, an imported one after the inherited ones.
+- A redefined feature named after `:>>` or `redefines` is resolved from the types the redefining feature's owner specializes (KerML 8.2.3.5.1). `part part2R :>> part2;` inside `part part1S :> part1` now resolves to `part1`'s `part2` in go-to-definition, references and rename, rather than to an unrelated element of the same name elsewhere.
+
 ## [0.39.0]
 
 ### Fixed
