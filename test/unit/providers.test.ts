@@ -1308,6 +1308,8 @@ describe('Semantic Tokens Provider', () => {
             '    part f : A;',
             '    part g subsets f;',
             '    part h redefines f;',
+            '    requirement r;',
+            '    satisfy r by e;',
             '}',
         ].join('\n');
         const { dm } = await setup(text);
@@ -1335,6 +1337,8 @@ describe('Semantic Tokens Provider', () => {
         // `subsets` and `redefines` name a feature, not a type: it stays a variable.
         expect(last(7)).toBe('f:3');
         expect(last(8)).toBe('f:3');
+        // A `by` not preceded by `defined` or `typed` names a feature: it stays a variable.
+        expect(last(10)).toBe('e:3');
     });
 
     it('should classify identifiers with variable token type', async () => {
