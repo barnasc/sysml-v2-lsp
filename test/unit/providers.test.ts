@@ -1296,6 +1296,42 @@ describe('Semantic Tokens Provider', () => {
         expect(tokenTypes).toContain(9); // number type
     });
 
+    it('should classify a single-quoted (unrestricted) name like a basic name, not as a string', async () => {
+        const { SemanticTokensProvider } = await import('../../server/src/providers/semanticTokensProvider.js');
+        const text = [
+            "package 'P 1' {",
+            "    part def 'D 1';",
+            "    part 'p 1' : 'D 1';",
+            '    attribute a = "text";',
+            "    part def 'Sub 1' specializes 'D 1';",
+            "    part 'p 2' defined by 'D 1';",
+            "    part 'p 3' typed by 'D 1';",
+            '}',
+        ].join('\n');
+        const { dm } = await setup(text);
+        const provider = new SemanticTokensProvider(dm);
+        const data = provider.provideSemanticTokens({ textDocument: { uri: 'test://test.sysml' } }).data;
+
+        const lines = text.split('\n');
+        const byLine = new Map<number, string[]>();
+        let line = 0;
+        let character = 0;
+        for (let i = 0; i < data.length; i += 5) {
+            line += data[i];
+            character = data[i] === 0 ? character + data[i + 1] : data[i + 1];
+            const token = `${lines[line].substr(character, data[i + 2])}:${data[i + 3]}`;
+            byLine.set(line, [...(byLine.get(line) ?? []), token]);
+        }
+        // Token types: 0 = namespace, 1 = type, 2 = class, 3 = variable, 8 = string.
+        expect(byLine.get(0)).toContain("'P 1':0");
+        expect(byLine.get(1)).toContain("'D 1':2");
+        expect(byLine.get(2)).toEqual(['part:6', "'p 1':3", "'D 1':1"]);
+        expect(byLine.get(3)!.at(-1)).toBe('"text":8');
+        expect(byLine.get(4)!.at(-1)).toBe("'D 1':1");
+        expect(byLine.get(5)!.at(-1)).toBe("'D 1':1");
+        expect(byLine.get(6)!.at(-1)).toBe("'D 1':1");
+    });
+
     it('should classify the type after a keyword form of \':\' or \':>\' as a type, like after the symbol', async () => {
         const { SemanticTokensProvider } = await import('../../server/src/providers/semanticTokensProvider.js');
         const text = [
