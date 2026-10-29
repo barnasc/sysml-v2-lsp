@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.40.0]
+
 ### Security
 
 - Update transitive `body-parser` to 2.4.0 (CVE-2026-111181) and `ip-address` to 10.7.5 (CVE-2026-111997) to address denial-of-service advisories.
