@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { quoteName } from '../../server/src/utils/identUtils.js';
+import { quoteName, splitQualifiedName } from '../../server/src/utils/identUtils.js';
 
 describe('Library Index', () => {
     beforeAll(async () => {
@@ -116,7 +116,17 @@ describe('Library Index', () => {
 
         it('should index no name with its quotes', async () => {
             const { getLibraryTypeNames } = await import('../../server/src/library/libraryIndex.js');
-            expect(getLibraryTypeNames().filter(name => name.startsWith("'") || name.includes("::'"))).toEqual([]);
+            expect(getLibraryTypeNames().flatMap(splitQualifiedName).filter(segment => segment.startsWith("'"))).toEqual([]);
+        });
+
+        it('should keep the spaces at the ends of a standard library name (if available)', async () => {
+            const { resolveLibraryType } = await import('../../server/src/library/libraryIndex.js');
+            // The spaces are part of an unrestricted name (KerML 8.2.2.3), so trimming them names a different element.
+            const declaration = resolveLibraryType("SI::'mL/L '");
+            expect(declaration?.uri).toMatch(/SI\.sysml$/);
+            expect(resolveLibraryType("'mL/L '")).toEqual(declaration);
+            expect(resolveLibraryType("SI::'mL/L'")).toBeUndefined();
+            expect(resolveLibraryType("'mL/L'")).toBeUndefined();
         });
 
         it('should list type names including scalar types', async () => {

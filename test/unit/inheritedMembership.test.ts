@@ -175,6 +175,75 @@ package Example {
         expect(await definitionLine(text, 'copy', 'old;')).toBe('part old;');
     });
 
+    it('resolves a reference in a redefining feature\'s body by normal name resolution, not as its redefinition target', async () => {
+        const text = `package P {
+    part old;
+    part def A {
+        part old [1];
+    }
+    part def B :> A {
+        part renamed :>> old {
+            part copy :> old;
+        }
+    }
+}`;
+        expect(await definitionLine(text, 'renamed', 'old {')).toBe('part old [1];');
+        expect(await definitionLine(text, 'copy', 'old;')).toBe('part old;');
+    });
+
+    it('resolves a quoted redefinition target with the spaces in its name', async () => {
+        const text = `package P {
+    part 'old feature';
+    part def A {
+        part 'old feature' [1];
+    }
+    part def B :> A {
+        part renamed :>> 'old feature';
+    }
+}`;
+        expect(await definitionLine(text, 'renamed', '\'old feature\';')).toBe('part \'old feature\' [1];');
+    });
+
+    it('resolves a quoted name with leading and trailing spaces, not the trimmed name', async () => {
+        const text = `package P {
+    part '  old feature   ';
+    part 'old feature';
+    part def A {
+        part '  old feature   ' [1];
+    }
+    part def B :> A {
+        part renamed :>> '  old feature   ';
+        part copy :> '  old feature   ';
+    }
+}`;
+        expect(await definitionLine(text, 'renamed', 'old feature   \';')).toBe('part \'  old feature   \' [1];');
+        expect(await definitionLine(text, 'copy', 'old feature   \';')).toBe('part \'  old feature   \';');
+    });
+
+    it('resolves a qualified redefinition or subsetting target to the named member, not the inherited one', async () => {
+        const text = `package P {
+    part old;
+    part ' my name ';
+    part def A {
+        part old [1];
+        part ' my name ' [1];
+    }
+    part def B :> A {
+        part renamed :>> P::old;
+        part copy :> P::old;
+        part renamedQuoted :>> P::' my name ';
+        part copyQuoted :> P::' my name ';
+        part renamedInherited :>> A::' my name ';
+    }
+}`;
+        expect(await definitionLine(text, 'renamed ', 'old;')).toBe('part old;');
+        expect(await definitionLine(text, 'copy ', 'old;')).toBe('part old;');
+        expect(await definitionLine(text, 'renamedQuoted', 'my name \';')).toBe('part \' my name \';');
+        expect(await definitionLine(text, 'copyQuoted', 'my name \';')).toBe('part \' my name \';');
+        expect(await definitionLine(text, 'renamedInherited', 'my name \';')).toBe('part \' my name \' [1];');
+        expect(await definitionLine(text, 'renamedQuoted', 'P::')).toBe('package P {');
+    });
+
     it('does not inherit a feature that another inherited feature redefines', async () => {
         const text = `package P {
     part def A {

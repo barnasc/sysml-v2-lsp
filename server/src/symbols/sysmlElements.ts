@@ -127,6 +127,8 @@ export interface SysMLSymbol {
     specializationNames: string[];
     /** Feature paths targeted by owned redefinitions, as written in the declaration. */
     redefinedFeatureTargets?: string[];
+    /** The source ranges of `redefinedFeatureTargets`, in the same order. */
+    redefinedFeatureTargetRanges?: Range[];
     /** Documentation string if available */
     documentation?: string;
     /** Visibility declared on the owning membership; omitted for default public visibility. */
