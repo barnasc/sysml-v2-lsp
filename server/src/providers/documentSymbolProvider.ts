@@ -15,13 +15,9 @@ export class DocumentSymbolProvider {
     constructor(private documentManager: DocumentManager) { }
 
     provideDocumentSymbols(params: DocumentSymbolParams): DocumentSymbol[] {
-        const symbolTable = this.documentManager.getSymbolTable(params.textDocument.uri);
-        if (!symbolTable) {
-            return [];
-        }
-
-        // Get all symbols for this document
-        const symbols = symbolTable.getSymbolsForUri(params.textDocument.uri);
+        // The workspace symbol table's: a usage named after a feature in another
+        // document is named after it, and named again when that document changes.
+        const symbols = this.documentManager.getWorkspaceSymbolTable().getSymbolsForUri(params.textDocument.uri);
 
         // Build hierarchical structure
         return this.buildHierarchy(symbols);

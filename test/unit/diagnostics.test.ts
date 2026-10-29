@@ -290,6 +290,47 @@ package Demo {
             // A hint (`missing-doc`) only.
             expect((await getSemanticDiagnostics(text)).filter(d => d.severity !== 3 && d.severity !== 4)).toEqual([]);
         });
+
+        it('should warn about variants named after one another', async () => {
+            const text = `
+package Demo {
+    item def I;
+    variation item v1 : I { variant v2::a; }
+    variation item v2 : I { variant v1::a; }
+}
+`;
+            const diags = (await getSemanticDiagnostics(text)).filter(d => d.code === 'circular-naming');
+            expect(diags.map(d => [d.severity, d.range.start, d.message])).toEqual([
+                [2, { line: 3, character: 36 }, "Circular naming: 'a' is named after itself through 'Demo::v1::a' -> 'Demo::v2::a'."],
+                [2, { line: 4, character: 36 }, "Circular naming: 'a' is named after itself through 'Demo::v2::a' -> 'Demo::v1::a'."],
+            ]);
+        });
+
+        it('should warn about variants whose names keep changing', async () => {
+            const text = `
+package Demo {
+    item def I;
+    part <a> alpha : I;
+    variation item v : I { variant a; variant alpha; }
+}
+`;
+            const diags = (await getSemanticDiagnostics(text)).filter(d => d.code === 'circular-naming');
+            expect(diags.map(d => [d.severity, d.range.start.line])).toEqual([[2, 4], [2, 4]]);
+            expect(diags.every(d => d.message.endsWith('keep changing without settling.'))).toBe(true);
+        });
+
+        it('should report no naming issue for a ten-step chain of variants', async () => {
+            const text = `
+package Demo {
+    item def I;
+    part <a> alpha : I;
+    variation item v1 : I { variant a; }
+${Array.from({ length: 9 }, (_, i) => `    variation item v${i + 2} : I { variant v${i + 1}::a; }`).join('\n')}
+}
+`;
+            const codes = (await getSemanticDiagnostics(text)).map(d => d.code);
+            expect(codes.filter(code => code === 'circular-naming' || code === 'naming-resolution-limit')).toEqual([]);
+        });
     });
 
     describe('flow definitions', () => {

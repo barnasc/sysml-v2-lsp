@@ -916,6 +916,24 @@ describe('Document Symbol Provider', () => {
         }
     });
 
+    it('should name a variant after a usage in another document, and again when that usage is renamed', async () => {
+        const { DocumentSymbolProvider } = await import('../../server/src/providers/documentSymbolProvider.js');
+        const { TextDocument } = await import('vscode-languageserver-textdocument');
+        const variationUri = 'test://variation.sysml';
+        const libUri = 'test://lib.sysml';
+        const { dm } = await setupMulti([
+            { uri: variationUri, text: 'package Demo { private import Lib::*; item def I; variation item choice : I { variant p1; } }' },
+            { uri: libUri, text: 'package Lib { part <p1> part1; }' },
+        ]);
+        const provider = new DocumentSymbolProvider(dm);
+        const variantName = () => provider.provideDocumentSymbols({ textDocument: { uri: variationUri } })[0]
+            .children!.find(s => s.name !== 'I')!.children!.map(s => s.name);
+
+        expect(variantName()).toEqual(['part1']);
+        dm.parse(TextDocument.create(libUri, 'sysml', 2, 'package Lib { part <p1> part2; }'));
+        expect(variantName()).toEqual(['part2']);
+    });
+
     it('should return empty for unknown URI', async () => {
         const { DocumentSymbolProvider } = await import('../../server/src/providers/documentSymbolProvider.js');
         const { DocumentManager } = await import('../../server/src/documentManager.js');

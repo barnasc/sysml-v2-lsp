@@ -2223,6 +2223,86 @@ package Demo {
         expect(variantOf(st)).toEqual([['Demo::itemChoice::p1', 'p1', undefined]]);
     });
 
+    describe('variants named after variants', () => {
+        // Each variation's variant names the one before it by its short name, which it only has once that one is named.
+        const chainText = (steps: number) => `
+package Demo {
+    item def I;
+    part <a> alpha : I;
+    variation item v1 : I { variant a; }
+${Array.from({ length: steps - 1 }, (_, i) => `    variation item v${i + 2} : I { variant v${i + 1}::a; }`).join('\n')}
+}
+`;
+        const variantsOf = (st: Awaited<ReturnType<typeof buildST>>['st']) => st.getAllSymbols()
+            .filter(s => s.namingReference !== undefined)
+            .sort((a, b) => a.range.start.line - b.range.start.line)
+            .map(s => [s.qualifiedName, s.shortName]);
+
+        it('should name each variant of a ten-step chain after the usage at its end', async () => {
+            const { st, result } = await buildST(chainText(10));
+
+            expect(result.errors).toHaveLength(0);
+            expect(variantsOf(st)).toEqual(Array.from({ length: 10 }, (_, i) => [`Demo::v${i + 1}::alpha`, 'a']));
+            expect(st.getNamingIssues('test://test.sysml')).toEqual([]);
+        });
+
+        it('should report the variants left unnamed when the budget of rounds runs out', async () => {
+            const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+            const { SymbolTable } = await import('../../server/src/symbols/symbolTable.js');
+            const st = new SymbolTable(3);
+            st.build('test://test.sysml', parseDocument(chainText(10)));
+
+            expect(variantsOf(st).slice(2, 4)).toEqual([['Demo::v3::alpha', 'a'], ['Demo::v4::a', undefined]]);
+            const issues = st.getNamingIssues('test://test.sysml');
+            expect(issues.map(issue => [issue.reason, issue.symbol.qualifiedName, issue.reason === 'limit' && issue.rounds]))
+                .toEqual([['limit', 'Demo::v4::a', 3]]);
+            const { describeNamingIssue } = await import('../../server/src/symbols/symbolTable.js');
+            expect(describeNamingIssue(issues[0])).toEqual({
+                code: 'naming-resolution-limit',
+                message: "The names of 'a' did not settle within 3 rounds of name resolution; it is named 'a' for now.",
+            });
+        });
+
+        it('should report variants whose names keep changing as unstable', async () => {
+            // Each variant is named after the other once both take the names of `alpha`.
+            const { st, result } = await buildST(`
+package Demo {
+    item def I;
+    part <a> alpha : I;
+    variation item v : I { variant a; variant alpha; }
+}
+`);
+
+            expect(result.errors).toHaveLength(0);
+            const issues = st.getNamingIssues('test://test.sysml');
+            expect(issues.map(issue => [issue.reason, issue.symbol.range.start.line])).toEqual([['unstable', 4], ['unstable', 4]]);
+            const { describeNamingIssue } = await import('../../server/src/symbols/symbolTable.js');
+            expect(describeNamingIssue(issues[0])).toEqual({
+                code: 'circular-naming',
+                message: `Circular naming: the names of '${issues[0].symbol.name}' keep changing without settling.`,
+            });
+        });
+
+        it('should report variants named after one another as a cycle, and keep their names', async () => {
+            const { st, result } = await buildST(`
+package Demo {
+    item def I;
+    variation item v1 : I { variant v2::a; }
+    variation item v2 : I { variant v1::a; }
+}
+`);
+
+            expect(result.errors).toHaveLength(0);
+            expect(variantsOf(st)).toEqual([['Demo::v1::a', undefined], ['Demo::v2::a', undefined]]);
+            const issues = st.getNamingIssues('test://test.sysml');
+            expect(issues.map(issue => [issue.reason, issue.symbol.qualifiedName, issue.reason === 'cycle' && issue.cycle.map(s => s.qualifiedName)]))
+                .toEqual([
+                    ['cycle', 'Demo::v1::a', ['Demo::v1::a', 'Demo::v2::a']],
+                    ['cycle', 'Demo::v2::a', ['Demo::v2::a', 'Demo::v1::a']],
+                ]);
+        });
+    });
+
     it('should leave a variant declared with a kind keyword as it is', async () => {
         const { st } = await buildST(`
 package Demo {

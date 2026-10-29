@@ -346,6 +346,40 @@ package Test {
             expect(choice.children.map(c => [c.name, c.type])).toEqual([['part1', 'ref'], ['item1', 'ref']]);
         });
 
+        it('should name a variant after a usage in another document, and again when that usage is renamed', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+            const variationUri = 'test://variation.sysml';
+            const libUri = 'test://lib.sysml';
+            const docManager = new DocumentManager();
+            docManager.parse(TextDocument.create(variationUri, 'sysml', 1,
+                'package Demo { private import Lib::*; item def I; variation item choice : I { variant p1; } }'));
+            docManager.parse(TextDocument.create(libUri, 'sysml', 1, 'package Lib { part <p1> part1; }'));
+            const provider = new SysMLModelProvider(docManager);
+            const variants = () => provider.getModel(variationUri, 1, ['elements']).elements![0].children
+                .find(e => e.name === 'choice')!.children.map(c => [c.name, c.displayName]);
+
+            expect(variants()).toEqual([['part1', 'part1']]);
+            docManager.parse(TextDocument.create(libUri, 'sysml', 2, 'package Lib { part <p1> part2; }'));
+            expect(variants()).toEqual([['part2', 'part2']]);
+        });
+
+        it('should report a variant named after itself through another variant', async () => {
+            const model = await getModelForText(`
+package Demo {
+    item def I;
+    variation item v1 : I { variant v2::a; }
+    variation item v2 : I { variant v1::a; }
+}
+`, ['diagnostics']);
+
+            expect(model.diagnostics!.filter(d => d.code === 'circular-naming').map(d => [d.elementName, d.severity, d.message])).toEqual([
+                ['a', 'warning', "Circular naming: 'a' is named after itself through 'Demo::v1::a' -> 'Demo::v2::a'."],
+                ['a', 'warning', "Circular naming: 'a' is named after itself through 'Demo::v2::a' -> 'Demo::v1::a'."],
+            ]);
+        });
+
         it('should report the workspace\'s symbol IDs, distinct for declarations clashing across documents', async () => {
             const { DocumentManager } = await import('../../server/src/documentManager.js');
             const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');

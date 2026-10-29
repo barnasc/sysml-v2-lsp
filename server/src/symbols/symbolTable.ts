@@ -9,7 +9,7 @@ import { joinQualifiedName, scanFeaturePaths, scanQualifiedNames, splitQualified
 import { IdRegistry } from './ids.js';
 import { buildSymbolIndexes, NamespaceResolver, SymbolIndexes } from './namespaceResolver.js';
 import { Scope } from './scope.js';
-import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isAnonymous, isDefinition, isFlowUsage, isUsage as isUsageKind } from './sysmlElements.js';
+import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, displayName, isAnonymous, isDefinition, isFlowUsage, isUsage as isUsageKind } from './sysmlElements.js';
 
 // ── ruleIndex-based lookup tables ───────────────────────────────────
 // These replace the toLowerCase() + string-comparison chains with O(1)
@@ -131,14 +131,50 @@ interface EffectiveName {
 }
 
 /**
- * Cap on the rounds of `refreshNamingFeatures`: a safety net, as a round only
- * follows one in which a document's effective names changed.
+ * Why a usage named after a feature it references (`namingReference`) has no
+ * settled effective name (`SymbolTable.getNamingIssues`).
  */
-const MAX_NAMING_FEATURE_ROUNDS = 8;
+export type NamingIssue =
+    /** Its naming feature is, through usages named after features they reference, named after it; it keeps the names it has. */
+    | { readonly reason: 'cycle'; readonly symbol: SysMLSymbol; readonly cycle: readonly SysMLSymbol[] }
+    /** Its names change again to ones it already had, without ever settling. */
+    | { readonly reason: 'unstable'; readonly symbol: SysMLSymbol }
+    /** Its names still changed after the budget of rounds (`refreshNamingFeatures`) ran out. */
+    | { readonly reason: 'limit'; readonly symbol: SysMLSymbol; readonly rounds: number };
+
+/** The diagnostic code and message reporting `issue`. */
+export function describeNamingIssue(issue: NamingIssue): { code: string; message: string } {
+    const name = `'${displayName(issue.symbol)}'`;
+    switch (issue.reason) {
+        case 'cycle':
+            return {
+                code: 'circular-naming',
+                message: `Circular naming: ${name} is named after itself through ${issue.cycle.map(s => `'${s.qualifiedName ?? displayName(s)}'`).join(' -> ')}.`,
+            };
+        case 'unstable':
+            return { code: 'circular-naming', message: `Circular naming: the names of ${name} keep changing without settling.` };
+        case 'limit':
+            return {
+                code: 'naming-resolution-limit',
+                message: `The names of ${name} did not settle within ${issue.rounds} rounds of name resolution; it is named '${issue.symbol.name}' for now.`,
+            };
+    }
+}
+
+/** By document, its effective names keyed by `rangeKey`. */
+type EffectiveNamesByUri = Map<string, Map<string, EffectiveName>>;
 
 /** A declaration's key within its document: where its range starts. */
 function rangeKey(range: Range): string {
     return `${range.start.line}:${range.start.character}`;
+}
+
+/** The effective names of all documents as one string, the same for the same names. */
+function effectiveNamesState(effectiveNames: ReadonlyMap<string, ReadonlyMap<string, EffectiveName>>): string {
+    const entries = [...effectiveNames]
+        .flatMap(([uri, names]) => [...names].map(([key, { name, shortName }]) => [uri, key, name, shortName ?? null]))
+        .sort((a, b) => `${a[0]}\0${a[1]}`.localeCompare(`${b[0]}\0${b[1]}`));
+    return JSON.stringify(entries);
 }
 
 /** Whether two documents' effective names, either missing when it has none, are the same. */
@@ -154,6 +190,39 @@ function sameEffectiveNames(a: ReadonlyMap<string, EffectiveName> | undefined, b
 /** The name of the last segment of a reference: the name of the feature it ends at. */
 function lastSegmentName(reference: string): string | undefined {
     return [...scanQualifiedNames(reference)].at(-1)?.segments.at(-1)?.name;
+}
+
+/**
+ * `symbol`'s effective names, named after `feature`: those of `feature`, or
+ * undefined when they are the reference as written or `feature` is anonymous.
+ */
+function namedAfter(symbol: SysMLSymbol, feature: SysMLSymbol): EffectiveName | undefined {
+    if (isAnonymous(feature)) return undefined;
+    if (feature.name === lastSegmentName(symbol.namingReference!) && feature.shortName === undefined) return undefined;
+    return { name: feature.name, shortName: feature.shortName };
+}
+
+/**
+ * Each usage on a cycle of usages named after one another, with that cycle
+ * starting at it; `features` maps each usage to its naming feature.
+ */
+function namingCycles(features: ReadonlyMap<SysMLSymbol, SysMLSymbol>): Map<SysMLSymbol, SysMLSymbol[]> {
+    const cycles = new Map<SysMLSymbol, SysMLSymbol[]>();
+    const visited = new Set<SysMLSymbol>();
+    for (const start of features.keys()) {
+        const path: SysMLSymbol[] = [];
+        let symbol: SysMLSymbol | undefined = start;
+        while (symbol && !visited.has(symbol)) {
+            visited.add(symbol);
+            path.push(symbol);
+            symbol = features.get(symbol);
+        }
+        const at = symbol ? path.indexOf(symbol) : -1;
+        if (at < 0) continue;
+        const cycle = path.slice(at);
+        cycle.forEach((member, i) => cycles.set(member, [...cycle.slice(i), ...cycle.slice(0, i)]));
+    }
+    return cycles;
 }
 
 /** Rules whose children contain a name (identification, name, qualifiedName) */
@@ -328,8 +397,14 @@ export class SymbolTable {
     private effectiveNamesByUri = new Map<string, Map<string, EffectiveName>>();
     /** While a document is built: its effective names */
     private effectiveNames: Map<string, EffectiveName> | undefined;
+    /** The usages whose effective names did not settle when last refreshed (`refreshNamingFeatures`) */
+    private namingIssues: NamingIssue[] = [];
 
-    constructor() {
+    /**
+     * @param namingRounds the budget of rounds of `refreshNamingFeatures`,
+     * instead of the one it derives from the usages it names
+     */
+    constructor(private readonly namingRounds?: number) {
         this.globalScope = new Scope('__global__');
     }
 
@@ -383,12 +458,31 @@ export class SymbolTable {
      * Build again each document whose usages named after a feature they
      * reference (`namingReference`) now have other effective names
      * (`resolveNamingFeatures`), until none does: a document's names may
-     * depend on another's.
+     * depend on another's. A round settles at least one more usage of an
+     * acyclic chain of such usages, so the budget is a round per such usage,
+     * and one more. It stops early when the names come back to ones it
+     * already built with; either way, it records the usages left unsettled
+     * (`getNamingIssues`).
      */
     private refreshNamingFeatures(): void {
-        for (let round = 0; round < MAX_NAMING_FEATURE_ROUNDS; round++) {
-            const effectiveNames = this.resolveNamingFeatures();
-            let rebuilt = false;
+        const budget = this.namingRounds
+            ?? this.getAllSymbolsIncludingDuplicates().filter(s => s.namingReference !== undefined).length + 1;
+        const built = new Set([effectiveNamesState(this.effectiveNamesByUri)]);
+        for (let rounds = 0; ; rounds++) {
+            const { effectiveNames, cycles } = this.resolveNamingFeatures();
+            const state = effectiveNamesState(effectiveNames);
+            const settled = state === effectiveNamesState(this.effectiveNamesByUri);
+            if (settled || built.has(state) || rounds === budget) {
+                const unsettled = settled ? [] : this.unsettledNamingUsages(effectiveNames);
+                this.namingIssues = [
+                    ...cycles,
+                    ...unsettled.map((symbol): NamingIssue => built.has(state)
+                        ? { reason: 'unstable', symbol }
+                        : { reason: 'limit', symbol, rounds }),
+                ];
+                return;
+            }
+            built.add(state);
             for (const [uri, tree] of this.trees) {
                 const names = effectiveNames.get(uri);
                 if (sameEffectiveNames(names, this.effectiveNamesByUri.get(uri))) continue;
@@ -396,10 +490,22 @@ export class SymbolTable {
                 if (names) this.effectiveNamesByUri.set(uri, names);
                 else this.effectiveNamesByUri.delete(uri);
                 this.collect(uri, tree);
-                rebuilt = true;
             }
-            if (!rebuilt) return;
         }
+    }
+
+    /** The usages whose effective names in `effectiveNames` differ from the ones they were built with. */
+    private unsettledNamingUsages(effectiveNames: EffectiveNamesByUri): SysMLSymbol[] {
+        return [...this.trees.keys()].flatMap(uri => {
+            const names = effectiveNames.get(uri);
+            const builtNames = this.effectiveNamesByUri.get(uri);
+            return this.getSymbolsForUri(uri).filter(symbol => {
+                if (symbol.namingReference === undefined) return false;
+                const key = rangeKey(symbol.range);
+                const [a, b] = [names?.get(key), builtNames?.get(key)];
+                return a?.name !== b?.name || a?.shortName !== b?.shortName;
+            });
+        });
     }
 
     /**
@@ -407,23 +513,41 @@ export class SymbolTable {
      * a feature it references (`namingReference`) whose names differ from the
      * reference as written: those of that feature (7.6.5, 8.3.6.4, 8.3.17.14),
      * whichever of its names the reference uses. Keyed by `rangeKey`. A
-     * reference to no feature in this table keeps its names as written.
+     * reference to no feature in this table keeps its names as written; a
+     * usage on a cycle of usages named after one another keeps the names it
+     * was built with, and is reported in `cycles`.
      */
-    private resolveNamingFeatures(): Map<string, Map<string, EffectiveName>> {
-        const effectiveNames = new Map<string, Map<string, EffectiveName>>();
+    private resolveNamingFeatures(): { effectiveNames: EffectiveNamesByUri; cycles: NamingIssue[] } {
+        const effectiveNames: EffectiveNamesByUri = new Map();
         const named = this.getAllSymbolsIncludingDuplicates().filter(s => s.namingReference !== undefined);
-        if (named.length === 0) return effectiveNames;
+        if (named.length === 0) return { effectiveNames, cycles: [] };
         const indexes = buildSymbolIndexes(this.getAllSymbols());
         const resolver = new NamespaceResolver();
+        const features = new Map<SysMLSymbol, SysMLSymbol>();
         for (const symbol of named) {
             const feature = this.resolveNamingFeature(symbol, resolver, indexes);
-            if (!feature || isAnonymous(feature)) continue;
-            if (feature.name === lastSegmentName(symbol.namingReference!) && feature.shortName === undefined) continue;
+            if (feature) features.set(symbol, feature);
+        }
+        const cycles = namingCycles(features);
+        for (const [symbol, feature] of features) {
+            const key = rangeKey(symbol.range);
+            const effectiveName = cycles.has(symbol)
+                ? this.effectiveNamesByUri.get(symbol.uri)?.get(key)
+                : namedAfter(symbol, feature);
+            if (!effectiveName) continue;
             const names = effectiveNames.get(symbol.uri) ?? new Map<string, EffectiveName>();
-            names.set(rangeKey(symbol.range), { name: feature.name, shortName: feature.shortName });
+            names.set(key, effectiveName);
             effectiveNames.set(symbol.uri, names);
         }
-        return effectiveNames;
+        return {
+            effectiveNames,
+            cycles: [...cycles].map(([symbol, cycle]): NamingIssue => ({ reason: 'cycle', symbol, cycle })),
+        };
+    }
+
+    /** The usages of `uri` whose effective names did not settle when last built, and why. */
+    getNamingIssues(uri: string): NamingIssue[] {
+        return this.namingIssues.filter(issue => issue.symbol.uri === uri);
     }
 
     /**

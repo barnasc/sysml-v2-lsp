@@ -55,6 +55,7 @@ import { RenameProvider } from './providers/renameProvider.js';
 import { SemanticTokensProvider, tokenModifiers, tokenTypes } from './providers/semanticTokensProvider.js';
 import { SemanticValidator } from './providers/semanticValidator.js';
 import { readTextValidationSettings, TextValidationProvider, type ValidateTextParams, type ValidateTextResult } from './providers/textValidationProvider.js';
+import type { ClearCacheResult, ServerStatsResult } from './serverStatsTypes.js';
 import { isInFolder, isSameDocumentUri } from './utils/documentUri.js';
 import { DEFAULT_SKIP_DIRS, findSysMLFilesAsync, readFilesBatch } from './utils/fileDiscovery.js';
 import { DEFAULT_URL_PREFIX, type FolderProjectId, getUrlPrefix, setFolderProjectIds, setProjectId } from './utils/uuid.js';
@@ -631,7 +632,6 @@ function dropDocumentsOutsideWorkspace(folderUris: readonly string[]): void {
         if (openDocumentFor(uri)) continue;
         if (folderUris.some(f => isInFolder(uri, f)) && !isInWorkspace(uri)) {
             documentManager.remove(uri);
-            modelProvider.removeUri(uri);
         }
     }
 }
@@ -663,7 +663,6 @@ function dropOtherSpellings(uri: string): void {
     for (const other of documentManager.getUris()) {
         if (other !== uri && isSameDocumentUri(other, uri)) {
             documentManager.remove(other);
-            modelProvider.removeUri(other);
         }
     }
 }
@@ -865,7 +864,6 @@ documents.onDidClose((event) => {
     }
 
     documentManager.remove(event.document.uri);
-    modelProvider.removeUri(event.document.uri);
     // Clear diagnostics for closed documents
     publishDiagnostics(event.document.uri, []);
 
@@ -1126,7 +1124,7 @@ connection.onRequest('sysml/validateText', async (params: ValidateTextParams): P
  * `sysml/serverStats` — returns server health/memory statistics.
  * Drives the LSP Health section of the status bar tooltip.
  */
-connection.onRequest('sysml/serverStats', () => {
+connection.onRequest('sysml/serverStats', (): ServerStatsResult => {
     const mem = (typeof process !== 'undefined' && typeof process.memoryUsage === 'function')
         ? process.memoryUsage()
         : { heapUsed: 0, heapTotal: 0, rss: 0, external: 0 } as NodeJS.MemoryUsage;
@@ -1141,7 +1139,7 @@ connection.onRequest('sysml/serverStats', () => {
         },
         caches: {
             documents: documentManager.getUris().length,
-            symbolTables: modelProvider.cacheSize,
+            symbolTables: 0,
             semanticTokens: 0,
         },
     };
@@ -1151,16 +1149,15 @@ connection.onRequest('sysml/serverStats', () => {
  * `sysml/clearCache` — flushes all in-memory caches.
  * Returns the number of evicted entries per cache category.
  */
-connection.onRequest('sysml/clearCache', () => {
+connection.onRequest('sysml/clearCache', (): ClearCacheResult => {
     const docCount = documentManager.getUris().length;
-    const stCount = modelProvider.clearAll();
     // Remove all cached documents
     for (const uri of documentManager.getUris()) {
         documentManager.remove(uri);
     }
     return {
         documents: docCount,
-        symbolTables: stCount,
+        symbolTables: 0,
         semanticTokens: 0,
     };
 });
