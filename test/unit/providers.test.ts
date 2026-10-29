@@ -1303,6 +1303,49 @@ describe('Semantic Tokens Provider', () => {
             "    part def 'D 1';",
             "    part 'p 1' : 'D 1';",
             '    attribute a = "text";',
+            "    part def 'Sub 1' specializes 'D 1';",
+            "    part 'p 2' defined by 'D 1';",
+            "    part 'p 3' typed by 'D 1';",
+            '}',
+        ].join('\n');
+        const { dm } = await setup(text);
+        const provider = new SemanticTokensProvider(dm);
+        const data = provider.provideSemanticTokens({ textDocument: { uri: 'test://test.sysml' } }).data;
+
+        const lines = text.split('\n');
+        const byLine = new Map<number, string[]>();
+        let line = 0;
+        let character = 0;
+        for (let i = 0; i < data.length; i += 5) {
+            line += data[i];
+            character = data[i] === 0 ? character + data[i + 1] : data[i + 1];
+            const token = `${lines[line].substr(character, data[i + 2])}:${data[i + 3]}`;
+            byLine.set(line, [...(byLine.get(line) ?? []), token]);
+        }
+        // Token types: 0 = namespace, 1 = type, 2 = class, 3 = variable, 8 = string.
+        expect(byLine.get(0)).toContain("'P 1':0");
+        expect(byLine.get(1)).toContain("'D 1':2");
+        expect(byLine.get(2)).toEqual(['part:6', "'p 1':3", "'D 1':1"]);
+        expect(byLine.get(3)!.at(-1)).toBe('"text":8');
+        expect(byLine.get(4)!.at(-1)).toBe("'D 1':1");
+        expect(byLine.get(5)!.at(-1)).toBe("'D 1':1");
+        expect(byLine.get(6)!.at(-1)).toBe("'D 1':1");
+    });
+
+    it('should classify the type after a keyword form of \':\' or \':>\' as a type, like after the symbol', async () => {
+        const { SemanticTokensProvider } = await import('../../server/src/providers/semanticTokensProvider.js');
+        const text = [
+            'package T {',
+            '    part def A;',
+            '    part def B specializes A;',
+            '    part def C :> A;',
+            '    part d defined by A;',
+            '    part e typed by A;',
+            '    part f : A;',
+            '    part g subsets f;',
+            '    part h redefines f;',
+            '    requirement r;',
+            '    satisfy r by e;',
             '}',
         ].join('\n');
         const { dm } = await setup(text);
@@ -1320,12 +1363,18 @@ describe('Semantic Tokens Provider', () => {
             const token = `${lines[line].substr(character, data[i + 2])}:${data[i + 3]}`;
             byLine.set(line, [...(byLine.get(line) ?? []), token]);
         }
-        // Token types: 0 = namespace, 1 = type, 2 = class, 3 = variable, 8 = string.
-        expect(byLine.get(0)).toContain("'P 1':0");
-        expect(byLine.get(1)).toContain("'D 1':2");
-        expect(byLine.get(2)).toEqual(['part:6', "'p 1':3", "'D 1':1"]);
-        // A double-quoted string value stays a string.
-        expect(byLine.get(3)!.at(-1)).toBe('"text":8');
+        const last = (lineIndex: number) => byLine.get(lineIndex)!.at(-1);
+        // Token types: 1 = type, 3 = variable.
+        expect(last(2)).toBe('A:1');
+        expect(last(3)).toBe('A:1');
+        expect(last(4)).toBe('A:1');
+        expect(last(5)).toBe('A:1');
+        expect(last(6)).toBe('A:1');
+        // `subsets` and `redefines` name a feature, not a type: it stays a variable.
+        expect(last(7)).toBe('f:3');
+        expect(last(8)).toBe('f:3');
+        // A `by` not preceded by `defined` or `typed` names a feature: it stays a variable.
+        expect(last(10)).toBe('e:3');
     });
 
     it('should classify a flow or message payload\'s type as a type, and its name as a variable, in every payload form', async () => {
