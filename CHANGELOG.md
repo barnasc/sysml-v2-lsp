@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Preserve syntax errors beside expressions, quoted names and notes in editor diagnostics and `sysml/validateText`, removing obsolete block-wide grammar-limitation suppression (#154). Valid arithmetic is already supported by the grammar's `ownedExpression` production.
 - A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
 - The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.

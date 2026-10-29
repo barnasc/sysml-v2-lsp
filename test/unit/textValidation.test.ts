@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { Diagnostic } from 'vscode-languageserver/node';
 import type { TextValidationSettings } from '../../server/src/providers/textValidationProvider.js';
+import { hiddenSyntaxErrorCases } from '../fixtures/syntaxDiagnostics.js';
 
 const enabled: TextValidationSettings = {
     enabled: true, maxDocuments: 10, maxLines: 1_000,
@@ -45,7 +46,7 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 
 /**
  * The diagnostics the server publishes for the open document at `uri`:
- * syntax (with the grammar-limitation suppression), keyword and semantic,
+ * syntax, keyword and semantic,
  * composed as `server.ts` composes them before publishing.
  */
 async function ownDiagnostics({ dm, semanticValidator }: Setup, uri: string): Promise<Diagnostic[]> {
@@ -251,6 +252,18 @@ describe('TextValidationProvider', () => {
     });
 
     describe('validation coverage: the diagnostics an open document with the same text gets', () => {
+        it.each(hiddenSyntaxErrorCases)('preserves syntax errors with $name (#154)', async ({ text, line }) => {
+            const uri = 'file:///ws/syntax.sysml';
+            const context = await setup([{ uri, text }]);
+            const errors = context.dm.get(uri)!.errors;
+            expect(errors).toHaveLength(1);
+            const diagnostics = context.validateOne(text, uri);
+            const syntaxDiagnostics = diagnostics.filter(d => d.severity === 1 && d.code === undefined);
+            expect(syntaxDiagnostics).toHaveLength(errors.length);
+            expect(syntaxDiagnostics[0].range.start.line).toBe(line);
+            expect(diagnostics).toEqual(await ownDiagnostics(context, uri));
+        });
+
         it('reports syntax errors', async () => {
             const { validateOne } = await setup([]);
             const diagnostics = validateOne('package P { part def A }');
