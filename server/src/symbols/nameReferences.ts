@@ -80,10 +80,14 @@ export class NameReferences {
                     let after = segment.end;
                     while (before >= 0 && /\s/.test(text[before])) before--;
                     while (after < text.length && /\s/.test(text[after])) after++;
-                    const declaration = symbols.find(symbol => !isAnonymous(symbol) && (
-                        (symbol.selectionRange.start.line === range.start.line &&
-                            symbol.selectionRange.start.character === range.start.character &&
-                            symbol.selectionRange.end.character === range.end.character) ||
+                    const atName = (symbol: SysMLSymbol) => symbol.selectionRange.start.line === range.start.line &&
+                        symbol.selectionRange.start.character === range.start.character &&
+                        symbol.selectionRange.end.character === range.end.character;
+                    // `perform a;`, `variant part1;`: named after the feature this token
+                    // references, so the token is that reference, never the usage itself.
+                    const namedAfter = symbols.find(symbol => symbol.namingReference !== undefined && atName(symbol));
+                    const declaration = symbols.find(symbol => !isAnonymous(symbol) && symbol !== namedAfter && (
+                        atName(symbol) ||
                         (symbol.shortName === segment.name && text[before] === '<' && text[after] === '>' &&
                             doc.offsetAt(symbol.range.start) <= segment.start &&
                             segment.end < doc.offsetAt(symbol.selectionRange.start))));
@@ -102,8 +106,15 @@ export class NameReferences {
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
                     } else {
-                        const result = this.resolver.resolveReferenceIn(
+                        let result = this.resolver.resolveReferenceIn(
                             namespace?.symbol, joinQualifiedName([segment.name]), this.indexes);
+                        // Found as the usage named after it: the feature it references is
+                        // declared further out.
+                        if (namedAfter && result.symbol === namedAfter) {
+                            const owner = this.symbols.find(symbol => symbol.symbolId === namedAfter.parentId);
+                            const outer = owner && this.symbols.find(symbol => symbol.symbolId === owner.parentId);
+                            result = this.resolver.resolveReferenceIn(outer, joinQualifiedName([segment.name]), this.indexes);
+                        }
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
                     }

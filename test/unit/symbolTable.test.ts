@@ -1970,6 +1970,54 @@ package Demo {
         expect(refs.map(s => [isAnonymous(s), displayName(s), st.getOwner(s)?.qualifiedName])).toEqual([[true, 'ref', 'Demo::P']]);
     });
 
+    it('should give a variant naming a separately declared usage a reference usage symbol named after it', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    item item1 : ItemDef;
+    part def P { part q : ItemDef; part r : ItemDef [*]; }
+    part p : P;
+    variation item itemChoice : ItemDef {
+        variant part1;
+        variant item1;
+        variant P::q;
+        variant p.r :> part1 { attribute m; }
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const variants = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice')
+            .sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(variants.map(s => [s.qualifiedName, s.kind, isAnonymous(s), s.specializationNames])).toEqual([
+            ['Demo::itemChoice::part1', 'ref', false, []],
+            ['Demo::itemChoice::item1', 'ref', false, []],
+            ['Demo::itemChoice::q', 'ref', false, []],
+            ['Demo::itemChoice::r', 'ref', false, ['part1']],
+        ]);
+        expect(st.findByName('m').map(s => s.parentId)).toEqual([variants[3].symbolId]);
+        // The usages it names keep their own symbols.
+        expect(st.findByName('part1').map(s => [s.qualifiedName, s.kind])).toEqual([['Demo::part1', 'part'], ['Demo::itemChoice::part1', 'ref']]);
+    });
+
+    it('should leave a variant declared with a kind keyword as it is', async () => {
+        const { st } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part references part1;
+        variant item item2 : ItemDef;
+    }
+}
+`);
+
+        const variants = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice')
+            .sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(variants.map(s => [s.kind, s.name, displayName(s)])).toEqual([['part', '', 'references part1'], ['item', 'item2', 'item2']]);
+    });
+
     it('should give no symbol to a usage right after a token the parser skipped (known limit)', async () => {
         const { st, result } = await buildST(`
 package Demo {

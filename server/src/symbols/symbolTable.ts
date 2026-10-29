@@ -67,6 +67,9 @@ const RULE_INDEX_TO_KIND = new Map<number, SysMLElementKind>([
     // A usage without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`) is a
     // reference usage, `ref` being optional (7.6.4, 8.2.2.6.3 DefaultReferenceUsage).
     [SysMLv2Parser.RULE_defaultReferenceUsage, SysMLElementKind.RefUsage],
+    // A variant naming a separately declared usage (`variant part1;`) is a
+    // reference usage too (7.6.7, 8.2.2.6.3 VariantReference).
+    [SysMLv2Parser.RULE_variantReference, SysMLElementKind.RefUsage],
     [SysMLv2Parser.RULE_interfaceUsage, SysMLElementKind.InterfaceUsage],         // 268
     [SysMLv2Parser.RULE_performActionUsage, SysMLElementKind.PerformActionUsage], // 298
     // A state's `entry`/`do`/`exit` action (`exit action a : A;`, `exit a;`): the
@@ -1012,6 +1015,7 @@ export class SymbolTable {
                 : this.extractTypeNames(ctx);
         const specializationNames = this.extractSpecializationNames(ctx);
         const redefinedFeatureTargets = this.extractRedefinedFeatureTargets(ctx);
+        const namingReference = anonymous ? undefined : this.namingReference(ctx, kind)?.getText();
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
         const visibility = this.extractVisibility(ctx);
@@ -1052,6 +1056,7 @@ export class SymbolTable {
             typeNames,
             specializationNames,
             redefinedFeatureTargets: redefinedFeatureTargets.length > 0 ? redefinedFeatureTargets : undefined,
+            namingReference,
             documentation,
             visibility,
             source: transition?.source,
@@ -1392,8 +1397,9 @@ export class SymbolTable {
     /**
      * A definition's or usage's name: the one it declares itself, else the
      * name of its naming feature (KerML/SysML effective name, 7.6.5) -- the
-     * element it performs, exhibits or includes (8.3.17.14), or the feature it
-     * redefines. Undefined when it has neither, i.e. when it is anonymous.
+     * element it performs, exhibits or includes (8.3.17.14), the usage a
+     * variant reference names (8.3.6.4), or the feature it redefines.
+     * Undefined when it has neither, i.e. when it is anonymous.
      */
     private extractOwnName(ctx: ParserRuleContext, kind: SysMLElementKind): string | undefined {
         // A flow in the feature form (`flow f : F of ...`) names itself in a featureIdentification.
@@ -1402,11 +1408,20 @@ export class SymbolTable {
         const declaredName = identification && this.parseIdentification(identification).name;
         if (declaredName) return declaredName;
 
-        const performed = PERFORMING_USAGE_KINDS.has(kind)
-            ? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedReferenceSubsetting)
-            : undefined;
-        const namingFeature = performed ?? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedRedefinition);
+        const namingFeature = this.namingReference(ctx, kind) ?? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedRedefinition);
         return namingFeature ? this.lastNameSegment(namingFeature) : undefined;
+    }
+
+    /**
+     * The reference a usage without a declared name is named after: the element
+     * it performs, exhibits or includes (8.3.17.14), or the usage a variant
+     * reference names (8.3.6.4). Undefined for any other usage.
+     */
+    private namingReference(ctx: ParserRuleContext, kind: SysMLElementKind): ParserRuleContext | undefined {
+        if (!PERFORMING_USAGE_KINDS.has(kind) && ctx.ruleIndex !== SysMLv2Parser.RULE_variantReference) return undefined;
+        const identification = this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_identification);
+        if (identification && this.parseIdentification(identification).name) return undefined;
+        return this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedReferenceSubsetting);
     }
 
     /**

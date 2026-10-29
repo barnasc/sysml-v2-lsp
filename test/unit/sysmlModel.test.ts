@@ -329,6 +329,23 @@ package Test {
             ]);
         });
 
+        it('should report a variant naming a separately declared usage as a `ref` child of its variation', async () => {
+            const model = await getModelForText(`
+package Test {
+    item def ItemDef;
+    part part1 : ItemDef;
+    item item1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part1;
+        variant item1;
+    }
+}
+`, ['elements']);
+
+            const choice = model.elements!.find(e => e.name === 'Test')!.children.find(e => e.name === 'itemChoice')!;
+            expect(choice.children.map(c => [c.name, c.type])).toEqual([['part1', 'ref'], ['item1', 'ref']]);
+        });
+
         it('should report the workspace\'s symbol IDs, distinct for declarations clashing across documents', async () => {
             const { DocumentManager } = await import('../../server/src/documentManager.js');
             const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');

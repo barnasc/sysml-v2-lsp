@@ -6,6 +6,7 @@
 
 - A usage declared without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`, `return : Real;`) gets a reference usage symbol, like one with `ref` (7.6.4), so parameters are no longer missing and an unknown type on one is reported as `unresolved-type`.
 - An empty declaration (`{ part w : A; }`, a lone `;`) is an anonymous reference usage, owning the members of its body.
+- A variant naming a separately declared usage (`variant part1;`) is a reference usage owned by its variation, named after that usage (7.6.7, 8.3.6.4). Go to definition on its name, and on `perform a;`, goes to the usage it references rather than to itself.
 
 ## [0.39.0]
 

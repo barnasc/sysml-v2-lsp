@@ -1591,3 +1591,37 @@ describe('parameters without a kind keyword', () => {
         expect(location?.range.start).toEqual({ line: 3, character: 24 });
     });
 });
+
+describe('usages named after the feature they reference', () => {
+    const uri = 'test://test.sysml';
+    const text = `package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part1;
+    }
+    action a;
+    part q { perform a; }
+}
+`;
+
+    it.each([
+        ['a variant', { line: 4, character: 18 }, { line: 2, character: 9 }],
+        ['a perform action', { line: 7, character: 21 }, { line: 6, character: 11 }],
+    ])('goes from %s to the feature it references, not to itself', async (_, position, start) => {
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { dm } = await setup(text, uri);
+        const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position });
+        expect(location?.range.start).toEqual(start);
+    });
+
+    it('lists a variant as a reference to the usage it names', async () => {
+        const { NameReferences } = await import('../../server/src/symbols/nameReferences.js');
+        const { dm } = await setup(text, uri);
+        const [part1] = dm.getWorkspaceSymbolTable().findByName('part1').filter(s => s.qualifiedName === 'Demo::part1');
+        expect(new NameReferences(dm).to(part1).map(ref => [ref.range.start, ref.isDeclaration])).toEqual([
+            [{ line: 2, character: 9 }, true],
+            [{ line: 4, character: 16 }, false],
+        ]);
+    });
+});

@@ -274,6 +274,24 @@ package Demo {
         });
     });
 
+    describe('variants naming a separately declared usage', () => {
+        it('should report no error or warning for variants named after the usages they reference', async () => {
+            const text = `
+package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    item item1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part1;
+        variant item1;
+    }
+}
+`;
+            // A hint (`missing-doc`) only.
+            expect((await getSemanticDiagnostics(text)).filter(d => d.severity !== 3 && d.severity !== 4)).toEqual([]);
+        });
+    });
+
     describe('unresolved type references', () => {
         it('should flag a type that does not exist in the document', async () => {
             const text = `
