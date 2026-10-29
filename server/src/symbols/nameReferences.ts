@@ -101,20 +101,13 @@ export class NameReferences {
                             ambiguous = result.ambiguous;
                         }
                     } else if (group > 0) {
-                        const result: NameResolution = receiver ? this.resolveFeature(receiver, segment.name)
+                        const result: NameResolution = receiver ? this.resolver.resolveFeatureReference(receiver, segment.name, this.indexes)
                             : { ambiguous: receiverAmbiguous };
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
                     } else {
-                        let result = this.resolver.resolveReferenceIn(
-                            namespace?.symbol, joinQualifiedName([segment.name]), this.indexes);
-                        // Found as the usage named after it: the feature it references is
-                        // declared further out.
-                        if (namedAfter && result.symbol === namedAfter) {
-                            const owner = this.symbols.find(symbol => symbol.symbolId === namedAfter.parentId);
-                            const outer = owner && this.symbols.find(symbol => symbol.symbolId === owner.parentId);
-                            result = this.resolver.resolveReferenceIn(outer, joinQualifiedName([segment.name]), this.indexes);
-                        }
+                        const result = this.resolver.resolveReferenceIn(
+                            namespace?.symbol, joinQualifiedName([segment.name]), this.indexes, namedAfter);
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
                     }
@@ -131,22 +124,5 @@ export class NameReferences {
             }
         }
         return refs;
-    }
-
-    private resolveFeature(receiver: SysMLSymbol, name: string): NameResolution {
-        const queue = [receiver];
-        const visited = new Set<SysMLSymbol>();
-        for (let index = 0; index < queue.length; index++) {
-            const owner = queue[index];
-            if (visited.has(owner)) continue;
-            visited.add(owner);
-            const member = this.resolver.resolveMemberReference(owner, name, this.indexes);
-            if (member.symbol || member.ambiguous) return member;
-            for (const typeName of owner.typeNames) {
-                const type = this.resolver.resolveNameFrom(owner, typeName, this.indexes);
-                if (type && !visited.has(type)) queue.push(type);
-            }
-        }
-        return { ambiguous: false };
     }
 }

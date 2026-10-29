@@ -1677,4 +1677,57 @@ describe('usages named after the feature they reference', () => {
             [{ line: 4, character: 16 }, false],
         ]);
     });
+
+    describe('a variant referencing a usage its variation imports', () => {
+        const imported = `package Demo {
+    item def ItemDef;
+    package Lib { part part1 : ItemDef; }
+    part part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        private import Lib::part1;
+        variant part1;
+    }
+}
+`;
+
+        it('goes to the imported usage, not to a same-named one declared further out', async () => {
+            const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+            const { dm } = await setup(imported, uri);
+            const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 6, character: 18 } });
+            expect(location?.range.start).toEqual({ line: 2, character: 23 });
+        });
+
+        it('goes to the imported usage when nothing further out has its name', async () => {
+            const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+            const { dm } = await setup(imported.replace('    part part1 : ItemDef;\n', ''), uri);
+            const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 5, character: 18 } });
+            expect(location?.range.start).toEqual({ line: 2, character: 23 });
+        });
+
+        it('renames the variant with the imported usage, never with the same-named one further out', async () => {
+            const { RenameProvider } = await import('../../server/src/providers/renameProvider.js');
+            const { dm } = await setup(imported, uri);
+            const provider = new RenameProvider(dm);
+            const edits = (onLine: number, character: number) => (provider.provideRename({ textDocument: { uri }, position: { line: onLine, character }, newName: 'z' })
+                ?.changes?.[uri] ?? []).map(edit => edit.range.start).sort((a, b) => a.line - b.line || a.character - b.character);
+            expect(edits(2, 23)).toEqual([
+                { line: 2, character: 23 }, { line: 5, character: 28 }, { line: 6, character: 16 },
+            ]);
+            expect(edits(3, 9)).toEqual([{ line: 3, character: 9 }]);
+        });
+    });
+
+    it('goes from a variant referencing a usage by its short name to that usage', async () => {
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { dm } = await setup(`package Demo {
+    item def ItemDef;
+    part <p1> part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant p1;
+    }
+}
+`, uri);
+        const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 4, character: 17 } });
+        expect(location?.range.start).toEqual({ line: 2, character: 14 });
+    });
 });

@@ -6,7 +6,7 @@
 
 - A usage declared without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`, `return : Real;`) gets a reference usage symbol, like one with `ref` (7.6.4), so parameters are no longer missing and an unknown type on one is reported as `unresolved-type`.
 - An empty declaration (`{ part w : A; }`, a lone `;`) is an anonymous reference usage, owning the members of its body.
-- A variant naming a separately declared usage (`variant part1;`) is a reference usage owned by its variation, named after that usage (7.6.7, 8.3.6.4). Go to definition on its name, and on `perform a;`, goes to the usage it references rather than to itself.
+- A variant naming a separately declared usage (`variant part1;`) is a reference usage owned by its variation, with that usage's name and short name, whichever of them it is referenced by (7.6.7, 8.3.6.4). Go to definition and rename on its name, and on `perform a;`, resolve it in its owning namespace, including that namespace's imports, to the usage it references rather than to itself.
 - A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
 - The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.

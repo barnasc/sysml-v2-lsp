@@ -203,6 +203,7 @@ export class DocumentManager {
      * previously built their own private tables should use this instead.
      */
     getWorkspaceSymbolTable(): SymbolTable {
+        const changed: Array<[string, ParseResult]> = [];
         for (const [uri, cached] of this.cache) {
             // Ensure lazy-cached entries are parsed before building workspace table
             if (cached.needsParse) {
@@ -210,9 +211,11 @@ export class DocumentManager {
             }
             const builtVersion = this.wsBuiltVersions.get(uri);
             if (builtVersion === cached.version) continue;
-            this.wsSymbolTable.build(uri, cached.result);
+            changed.push([uri, cached.result]);
             this.wsBuiltVersions.set(uri, cached.version);
         }
+        // Built together, so a usage named after a feature in another of them is named after it.
+        if (changed.length > 0) this.wsSymbolTable.buildAll(changed);
         return this.wsSymbolTable;
     }
 

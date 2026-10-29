@@ -2150,6 +2150,79 @@ package Demo {
         expect(st.findByName('part1').map(s => [s.qualifiedName, s.kind])).toEqual([['Demo::part1', 'part'], ['Demo::itemChoice::part1', 'ref']]);
     });
 
+    it('should name a variant after the usage it references, whichever of its names it is referenced by', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part <p1> part1 : ItemDef;
+    package Lib { part <q1> q : ItemDef; }
+    variation item itemChoice : ItemDef {
+        variant p1;
+        variant Lib::q1;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const variants = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice')
+            .sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(variants.map(s => [s.qualifiedName, s.name, s.shortName, s.namingReference])).toEqual([
+            ['Demo::itemChoice::part1', 'part1', 'p1', 'p1'],
+            ['Demo::itemChoice::q', 'q', 'q1', 'Lib::q1'],
+        ]);
+        // Its selection is still the reference as written.
+        expect([variants[0].selectionRange.start, variants[0].selectionRange.end]).toEqual([{ line: 6, character: 16 }, { line: 6, character: 18 }]);
+    });
+
+    it('should name a variant referencing a feature through a feature chain after that feature', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part def P { part <r1> r : ItemDef; }
+    part p : P;
+    variation item itemChoice : ItemDef {
+        variant p.r1;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const [variant] = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice');
+        expect([variant.qualifiedName, variant.name, variant.shortName]).toEqual(['Demo::itemChoice::r', 'r', 'r1']);
+    });
+
+    it('should name a variant after a usage in another document, whichever document is built first', async () => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        const { SymbolTable } = await import('../../server/src/symbols/symbolTable.js');
+        const variation = { uri: 'test://variation.sysml', text: `
+package Demo {
+    private import Lib::*;
+    item def ItemDef;
+    variation item itemChoice : ItemDef {
+        variant p1;
+    }
+}
+` };
+        const lib = { uri: 'test://lib.sysml', text: 'package Lib { part <p1> part1; }' };
+        const variantOf = (st: InstanceType<typeof SymbolTable>) => st.getAllSymbols()
+            .filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice').map(s => [s.qualifiedName, s.name, s.shortName]);
+
+        for (const order of [[variation, lib], [lib, variation]]) {
+            const st = new SymbolTable();
+            for (const { uri, text } of order) st.build(uri, parseDocument(text));
+            expect(variantOf(st)).toEqual([['Demo::itemChoice::part1', 'part1', 'p1']]);
+        }
+        const st = new SymbolTable();
+        st.buildAll([variation, lib].map(({ uri, text }) => [uri, parseDocument(text)]));
+        expect(variantOf(st)).toEqual([['Demo::itemChoice::part1', 'part1', 'p1']]);
+
+        // Renamed in its own document, it renames the variant; gone, the variant keeps the name it is referenced by.
+        st.build(lib.uri, parseDocument('package Lib { part <p1> part2; }'));
+        expect(variantOf(st)).toEqual([['Demo::itemChoice::part2', 'part2', 'p1']]);
+        st.removeUri(lib.uri);
+        expect(variantOf(st)).toEqual([['Demo::itemChoice::p1', 'p1', undefined]]);
+    });
+
     it('should leave a variant declared with a kind keyword as it is', async () => {
         const { st } = await buildST(`
 package Demo {
