@@ -398,9 +398,8 @@ const BOUNDARY_TOKENS = new Set([
  * visible token is an identifier that isn't a keyword, relocate the error
  * to that identifier — it's almost certainly the real problem.
  *
- * Also detects a reserved keyword used as a name (e.g. `part frame`,
- * `keywordAsNameMessage`) and produces a clear message instead of ANTLR's
- * cryptic "no viable alternative at input 'partframe'".
+ * Also detects a reserved keyword used as a name (`keywordAsNameMessage`)
+ * and produces a clear message instead of ANTLR's own.
  *
  * Accepts a pre-built visible token array + position index to avoid
  * redundant filtering and O(n) linear searches.

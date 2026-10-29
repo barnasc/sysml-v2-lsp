@@ -20,11 +20,18 @@ it('reports a keyword as a name only where it is one, in the worker and the main
     connection.onNotification('textDocument/publishDiagnostics', (params: { uri: string; diagnostics: Diagnostic[] }) => {
         published.set(params.uri, [...(published.get(params.uri) ?? []), params.diagnostics]);
     });
+    const workerParsed = new Set<string>();
+    connection.onNotification('sysml/status', (params: { state: string; message: string; uri?: string }) => {
+        if (params.state === 'end' && params.uri && params.message.includes('worker + main')) workerParsed.add(params.uri);
+    });
     connection.listen();
-    const cases = {
+    const cases: Record<string, { text: string; asName: boolean; parserMessage?: string }> = {
         keywordName: { text: 'part def part;', asName: true },
         missingSemicolon: { text: 'part def A {\n  attribute x : Real\n  attribute y : Real;\n}', asName: false },
         successionFlowDef: { text: 'succession flow def SF;', asName: false },
+        repeatedDirectionBasicName: { text: 'part def B { in attribute in y; }', asName: false, parserMessage: "extraneous input 'in'" },
+        repeatedDirectionUnrestrictedName: { text: "part def B { in attribute in 'y'; }", asName: false, parserMessage: "extraneous input 'in'" },
+        repeatedDirectionUnreservedKeywordName: { text: 'part def B { in attribute in type; }', asName: false, parserMessage: "extraneous input 'in'" },
     };
     try {
         await connection.sendRequest('initialize', { processId: process.pid, rootUri: null, capabilities: {} });
@@ -39,11 +46,15 @@ it('reports a keyword as a name only where it is one, in the worker and the main
         while (Object.keys(cases).some(name => (published.get(`file:///${name}.sysml`)?.length ?? 0) < 2) && Date.now() < deadline) {
             await new Promise(resolve => setTimeout(resolve, 100));
         }
-        for (const [name, { asName }] of Object.entries(cases)) {
+        for (const [name, { asName, parserMessage }] of Object.entries(cases)) {
             const sets = published.get(`file:///${name}.sysml`) ?? [];
+            expect(workerParsed.has(`file:///${name}.sysml`), `${name} parsed by the worker`).toBe(true);
             expect(sets.length, name).toBeGreaterThanOrEqual(2);
             for (const diagnostics of sets) {
                 expect(diagnostics.some(d => Diagnostic.getMessageString(d).includes('reserved SysML keyword')), name).toBe(asName);
+                if (parserMessage) {
+                    expect(diagnostics.some(d => Diagnostic.getMessageString(d).startsWith(parserMessage)), name).toBe(true);
+                }
             }
         }
         await connection.sendRequest('shutdown');

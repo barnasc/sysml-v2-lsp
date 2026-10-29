@@ -1,7 +1,7 @@
 import { Token } from 'antlr4ng';
 import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
 
-/** Keywords a declared name can directly follow (`part def <name>`, `in attribute <name>`). */
+/** Keywords and symbols a declared name can directly follow. */
 export const NAME_PRECEDING_KEYWORDS: ReadonlySet<number> = new Set([
     // ── SysML definition/usage element keywords ──
     SysMLv2Lexer.PART, SysMLv2Lexer.PORT, SysMLv2Lexer.ITEM,
@@ -75,17 +75,28 @@ export const NAME_PRECEDING_KEYWORDS: ReadonlySet<number> = new Set([
     SysMLv2Lexer.COMMA, SysMLv2Lexer.HASH, SysMLv2Lexer.AT,
 ]);
 
+/** Tokens the grammar's `name` rule accepts: basic and unrestricted names, and unreserved keywords. */
+const NAME_TOKENS: ReadonlySet<number> = new Set([
+    SysMLv2Lexer.IDENTIFIER, SysMLv2Lexer.STRING,
+    // ── Unreserved keywords (`unreservedKeyword` in SysMLv2Parser.g4) ──
+    SysMLv2Lexer.TYPE, SysMLv2Lexer.MULTIPLICITY, SysMLv2Lexer.VAR,
+    SysMLv2Lexer.LANGUAGE, SysMLv2Lexer.LOCALE, SysMLv2Lexer.CROSSES,
+    SysMLv2Lexer.STEP, SysMLv2Lexer.FEATURE, SysMLv2Lexer.BEHAVIOR,
+    SysMLv2Lexer.FUNCTION, SysMLv2Lexer.MEMBER, SysMLv2Lexer.PREDICATE,
+    SysMLv2Lexer.INTERACTION, SysMLv2Lexer.METACLASS,
+]);
+
 /**
  * The message for a syntax error on a reserved keyword used as a name (KerML 8.2.2.6), or
  * `undefined` when `token` is not one. It is one only where a declaration keyword precedes it and
- * no name follows it: a name never directly follows another name, so in `in attribute in y` or
- * `succession flow def SF` the keyword is misplaced, not a name.
+ * no name follows it: a name never directly follows another name, so a keyword followed by a basic
+ * name, an unrestricted name (KerML 8.2.2.3) or an unreserved keyword is misplaced, not a name.
  */
 export function keywordAsNameMessage(previous: Token | undefined, token: Token, next: Token | undefined): string | undefined {
     const word = token.text;
     if (token.type === SysMLv2Lexer.IDENTIFIER || token.type === Token.EOF || !word || !/^[a-z]+$/.test(word)) return undefined;
     if (previous === undefined || !NAME_PRECEDING_KEYWORDS.has(previous.type)) return undefined;
-    if (next?.type === SysMLv2Lexer.IDENTIFIER) return undefined;
+    if (next !== undefined && NAME_TOKENS.has(next.type)) return undefined;
     const suggestion = 'my' + word.charAt(0).toUpperCase() + word.slice(1);
     return `'${word}' is a reserved SysML keyword and cannot be used as a name. Consider renaming it (e.g., '${suggestion}').`;
 }

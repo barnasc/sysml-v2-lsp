@@ -70,6 +70,7 @@ package Bikes {
             ['a definition named by a keyword', 'part def part;', 'part'],
             ['a usage named by a keyword', 'part def V { part frame : V; }', 'frame'],
             ['a definition named `default`', 'package P { part def default; }', 'default'],
+            ['a feature named by a keyword after its direction', 'part def B { in attribute in; }', 'in'],
         ])('reports %s as a reserved keyword used as a name', async (_case, text, word) => {
             expect(await syntaxMessages(text)).toContain(
                 `'${word}' is a reserved SysML keyword and cannot be used as a name. Consider renaming it (e.g., 'my${word.charAt(0).toUpperCase()}${word.slice(1)}').`,
@@ -78,12 +79,19 @@ package Bikes {
 
         it.each([
             ['a keyword after a missing `;`', 'part def A {\n  attribute x : Real\n  attribute y : Real;\n}', "mismatched input 'attribute'"],
-            ['a repeated direction', 'part def B { in attribute in y; }', "extraneous input 'in'"],
+            ['a repeated direction before a basic name', 'part def B { in attribute in y; }', "extraneous input 'in'"],
+            ['a repeated direction before an unrestricted name', "part def B { in attribute in 'y'; }", "extraneous input 'in'"],
+            ['a repeated direction before an unrestricted name with an escape', "part def B { in attribute in 'it\\'s'; }", "extraneous input 'in'"],
+            ['a repeated direction before an unreserved keyword name', 'part def B { in attribute in type; }', "extraneous input 'in'"],
             ['`def` after `succession flow`', 'succession flow def SF;', "mismatched input 'def'"],
         ])("keeps the parser's message for %s", async (_case, text, parserMessage) => {
             const messages = await syntaxMessages(text);
             expect(messages.some(m => m.startsWith(parserMessage))).toBe(true);
             expect(messages.some(m => m.includes('reserved SysML keyword'))).toBe(false);
+        });
+
+        it('accepts a reserved keyword as an unrestricted name', async () => {
+            expect(await syntaxMessages("part def 'part';")).toEqual([]);
         });
     });
 
