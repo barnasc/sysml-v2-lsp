@@ -134,7 +134,10 @@ export class SemanticTokensProvider {
         result.tokenStream.fill();
         const tokens = result.tokenStream.getTokens();
 
-        let prevMeaningful: string | undefined;
+        // The text of the last two tokens on the default channel (whitespace skipped), for
+        // context-sensitive classification: `previousText` is the one just before this token.
+        let previousText: string | undefined;
+        let textBeforePrevious: string | undefined;
         const payloadTypes = result.tree ? payloadTypeTokenIndices(result.tree) : new Set<number>();
 
         for (const token of tokens) {
@@ -143,10 +146,10 @@ export class SemanticTokensProvider {
             }
 
             const text = token.text;
-            const tokenType = payloadTypes.has(token.tokenIndex) ? 1 : this.classifyTokenInContext(text, prevMeaningful, token.type);
+            const tokenType = payloadTypes.has(token.tokenIndex) ? 1 : this.classifyTokenInContext(text, previousText, textBeforePrevious, token.type);
 
-            // Track previous meaningful token for context-sensitive classification
-            prevMeaningful = text;
+            textBeforePrevious = previousText;
+            previousText = text;
 
             if (tokenType === undefined) {
                 continue;
@@ -170,7 +173,7 @@ export class SemanticTokensProvider {
     /**
      * Classify a token using surrounding context to match tmLanguage scopes.
      */
-    private classifyTokenInContext(text: string, prev: string | undefined, lexerType: number): number | undefined {
+    private classifyTokenInContext(text: string, previous: string | undefined, beforePrevious: string | undefined, lexerType: number): number | undefined {
         // Comments
         if (lexerType === SysMLv2Lexer.REGULAR_COMMENT || lexerType === SysMLv2Lexer.SINGLE_LINE_NOTE) {
             return 7; // comment
@@ -203,36 +206,42 @@ export class SemanticTokensProvider {
 
         // Identifiers — context-sensitive classification
         if (lexerType === SysMLv2Lexer.IDENTIFIER) {
-            return this.classifyIdentifier(prev);
+            return this.classifyIdentifier(previous, beforePrevious);
         }
 
         return undefined;
     }
 
     /**
-     * Classify an identifier based on the previous meaningful token,
+     * Classify an identifier by the text of the two tokens before it,
      * mirroring the tmLanguage patterns for consistent highlighting.
      */
-    private classifyIdentifier(prev: string | undefined): number {
-        if (!prev) return 3; // default: variable
+    private classifyIdentifier(previous: string | undefined, beforePrevious: string | undefined): number {
+        if (!previous) return 3; // default: variable
 
         // After 'def' → type definition (matches entity.name.type.sysml)
-        if (prev === 'def') return 2; // class
+        if (previous === 'def') return 2; // class
 
         // After package/namespace/library → namespace (matches entity.name.namespace.sysml)
-        if (prev === 'package' || prev === 'namespace' || prev === 'library') return 0; // namespace
+        if (previous === 'package' || previous === 'namespace' || previous === 'library') return 0; // namespace
 
         // After action/calc → function name (matches entity.name.function.sysml)
-        if (prev === 'action' || prev === 'calc' || prev === 'analysis' || prev === 'verification') return 5; // function
+        if (previous === 'action' || previous === 'calc' || previous === 'analysis' || previous === 'verification') return 5; // function
 
         // After ':' or ':>' or ':>>' → type reference (matches entity.name.type.sysml)
-        if (prev === ':' || prev === ':>' || prev === ':>>') return 1; // type
+        if (previous === ':' || previous === ':>' || previous === ':>>') return 1; // type
+
+        // After the keyword forms of ':' and ':>' naming a type → type reference, like the symbol
+        // (SysML 8.2.2.1: DEFINED_BY = ':' | 'defined' 'by', SPECIALIZES = ':>' | 'specializes';
+        // KerML 8.2.2.1: TYPED_BY = ':' | 'typed' 'by')
+        if (previous === 'specializes') return 1; // type
+        if (previous === 'by' && (beforePrevious === 'defined' || beforePrevious === 'typed')) return 1; // type
 
         // After 'attribute' → property (matches variable.other.property.sysml)
-        if (prev === 'attribute') return 4; // property
+        if (previous === 'attribute') return 4; // property
 
         // After structural/usage keywords → member variable (matches variable.other.member.sysml)
-        if (this.isStructuralKeyword(prev)) return 3; // variable
+        if (this.isStructuralKeyword(previous)) return 3; // variable
 
         // Default: generic identifier
         return 3; // variable
