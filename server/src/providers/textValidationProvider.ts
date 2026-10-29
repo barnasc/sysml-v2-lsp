@@ -147,7 +147,6 @@ export class TextValidationProvider {
 
     /** The syntax, keyword and semantic diagnostics of the document at `uri`, as published for an open document. */
     private diagnose(uri: string): Diagnostic[] {
-        // A fresh provider, so its per-URI cache never holds a stand-in.
         const diagnostics = new DiagnosticsProvider(this.documentManager).getDiagnostics(uri);
         const parseResult = this.documentManager.get(uri);
         if (parseResult) diagnostics.push(...validateKeywords(parseResult));

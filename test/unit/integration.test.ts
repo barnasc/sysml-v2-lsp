@@ -7,11 +7,11 @@
  * pipeline produces correct, coherent results for realistic SysML
  * models.
  *
- * They also cover the two bug-fix scenarios introduced in this branch:
- *   (8) keyword set must be derived from the generated ANTLR lexer
- *   (1) diagnostics suppression must be narrowed to expression blocks
+ * They also cover lexer-derived keywords and preservation of syntax errors
+ * alongside valid expressions, unrestricted names and notes.
  */
 import { describe, expect, it } from 'vitest';
+import { hiddenSyntaxErrorCases } from '../fixtures/syntaxDiagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Helpers (same dynamic-import pattern used by existing tests)
@@ -101,10 +101,25 @@ package KeywordTest {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Fix (1) — narrowed diagnostics suppression
+// Syntax diagnostics alongside valid expressions
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('Diagnostics suppression narrowing', () => {
+describe('Syntax diagnostic preservation', () => {
+    it.each(hiddenSyntaxErrorCases)('reports every parser error with $name (#154)', async ({ text, line }) => {
+        const { DiagnosticsProvider } = await import('../../server/src/providers/diagnosticsProvider.js');
+        const { dm, uri } = await setup(text);
+        const errors = dm.get(uri)!.errors;
+        expect(errors).toHaveLength(1);
+        expect(errors[0].line).toBe(line);
+
+        const diagnostics = new DiagnosticsProvider(dm).getDiagnostics(uri);
+        expect(diagnostics.map(d => d.range)).toEqual(errors.map(error => ({
+            start: { line: error.line, character: error.column },
+            end: { line: error.line, character: error.column + error.length },
+        })));
+        expect(diagnostics[0]).toMatchObject({ severity: 1, source: 'sysml' });
+    });
+
     it('should report syntax errors in blocks WITHOUT expression operators', async () => {
         const { DiagnosticsProvider } = await import('../../server/src/providers/diagnosticsProvider.js');
         // This block has no arithmetic / expression operators.
@@ -128,16 +143,17 @@ package BrakeSystem {
         expect(messages).toMatch(/mismatched|extraneous|no viable/i);
     });
 
-    it('should still suppress errors in blocks WITH expression operators', async () => {
+    it.each([
+        'weight == mass * 9.81', 'weight == 10 * 2', 'weight == 2 + 3',
+    ])('parses valid expression %s without syntax errors', async expression => {
         const { DiagnosticsProvider } = await import('../../server/src/providers/diagnosticsProvider.js');
-        // The constraint body contains "mass * 9.81" which the grammar
-        // cannot parse — errors inside this block should be suppressed.
+        // SysMLv2Parser.ownedExpression supports arithmetic; no filtering is needed.
         const text = `
 package Physics {
     constraint def GravityConstraint {
         attribute mass : Real;
         attribute weight : Real;
-        weight == mass * 9.81
+        ${expression}
     }
 }
 `;
@@ -145,17 +161,13 @@ package Physics {
         const provider = new DiagnosticsProvider(dm);
         const diags = provider.getDiagnostics(uri);
 
-        // Errors from the unparseable expression should be suppressed
-        const exprErrors = diags.filter(d =>
-            d.message.includes('*') || d.message.includes('9.81')
-        );
-        expect(exprErrors.length).toBe(0);
+        expect(dm.get(uri)!.errors).toEqual([]);
+        expect(diags).toEqual([]);
     });
 
     it('should not globally suppress extraneous "}" errors in unrelated blocks', async () => {
         const { DiagnosticsProvider } = await import('../../server/src/providers/diagnosticsProvider.js');
-        // Two separate blocks: one with expressions (suppressed) and one
-        // with a stray "}" (should NOT be suppressed).
+        // A valid expression does not hide a trailing stray brace.
         const text = `
 package Mixed {
     constraint def ForceCalc {
@@ -169,13 +181,11 @@ package Mixed {
         const provider = new DiagnosticsProvider(dm);
         const diags = provider.getDiagnostics(uri);
 
-        // The trailing stray "}" is outside any suppressed block,
-        // so it should produce a diagnostic
         const braceErrors = diags.filter(d => d.message.includes('}'));
         expect(braceErrors.length).toBeGreaterThan(0);
     });
 
-    it('should suppress errors only in the block that contains expressions, not siblings', async () => {
+    it('reports errors in a sibling of a valid expression block', async () => {
         const { DiagnosticsProvider } = await import('../../server/src/providers/diagnosticsProvider.js');
         const text = `
 package TwoBlocks {
@@ -192,15 +202,15 @@ package TwoBlocks {
         const provider = new DiagnosticsProvider(dm);
         const diags = provider.getDiagnostics(uri);
 
-        // The key invariant: the Calc block's expression errors are
-        // suppressed, while errors in sibling blocks are not.
-        // Calc block is roughly lines 2-5 (0-indexed)
+        const errors = dm.get(uri)!.errors;
+        expect(errors.length).toBeGreaterThan(0);
+        expect(diags).toHaveLength(errors.length);
         const calcBlockErrors = diags.filter(d => {
             const line = d.range.start.line;
             return line >= 2 && line <= 5;
         });
-        // Expression errors inside Calc should be suppressed
         expect(calcBlockErrors.length).toBe(0);
+        expect(diags.some(d => d.range.start.line === 7)).toBe(true);
     });
 });
 

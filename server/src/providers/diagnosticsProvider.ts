@@ -1,39 +1,14 @@
+import { CommonTokenStream, Token } from 'antlr4ng';
 import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver/node';
 import { DocumentManager } from '../documentManager.js';
 import { SyntaxError } from '../parser/errorListener.js';
-import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
-import { stripComments } from '../utils/identUtils.js';
-
-/**
- * Patterns that indicate constructs the ANTLR grammar cannot handle.
- * Only blocks whose body text matches at least one of these patterns
- * will have their syntax errors suppressed.
- *
- *  - Arithmetic / unit operators:  +  -  *  /  ^  **  used as infix
- *    operators in value expressions (e.g. `mass * 9.81`, `W/m^2`).
- *  - Collection / streaming operators:  ->  .?
- *  - Assignment operator inside expressions:  :=
- *  - Doc comments after typed parameters:  `; doc /*`
- *  - Prefix metadata annotations:  `#identifier`
- *
- * The patterns are intentionally conservative: a bare `+` adjacent to a
- * word character or digit on both sides is required, so that a `+` in a
- * comment or string doesn't trigger suppression.
- */
-const EXPRESSION_OPERATOR_RE =
-    /(\w\s*[+\-*/^]\s*\w)|(\w\s*\*\*\s*\w)|->|\.(?:\?)|:=|;\s*doc\b|#\w+\s+dependency/;
+import { keywordAsNameMessage } from '../parser/keywordAsName.js';
 
 /**
  * Provides diagnostics (errors/warnings) for SysML documents.
  * Converts ANTLR parse errors into LSP Diagnostic objects.
  */
 export class DiagnosticsProvider {
-    /** Cached grammar limitation ranges per URI, keyed by document version. */
-    private grammarRangeCache = new Map<string, {
-        version: number;
-        ranges: Array<{ startLine: number; endLine: number }>;
-    }>();
-
     constructor(private documentManager: DocumentManager) { }
 
     /**
@@ -45,60 +20,18 @@ export class DiagnosticsProvider {
             return [];
         }
 
-        const text = this.documentManager.getText(uri);
-        const version = this.documentManager.getVersion(uri);
-
-        // Use cached grammar limitation ranges if document version hasn't changed
-        let suppressedRanges: Array<{ startLine: number; endLine: number }>;
-        const cached = this.grammarRangeCache.get(uri);
-        if (cached && cached.version === version) {
-            suppressedRanges = cached.ranges;
-        } else if (text) {
-            suppressedRanges = this.findGrammarLimitationRanges(text);
-            this.grammarRangeCache.set(uri, { version, ranges: suppressedRanges });
-        } else {
-            suppressedRanges = [];
-        }
-
-        const diagnostics: Diagnostic[] = [];
-
-        for (const error of result.errors) {
-            // Suppress syntax errors only inside blocks that actually
-            // contain expression operators the ANTLR grammar cannot parse.
-            if (suppressedRanges.length > 0) {
-                if (this.isLineInRanges(error.line, suppressedRanges)) {
-                    continue;
-                }
-                // Suppress cascading "extraneous input '}'" errors only
-                // when they fall on the closing line of a suppressed block,
-                // not document-wide.
-                if (
-                    error.message.startsWith('extraneous input \'}\' expecting') &&
-                    this.isLineAtEndOfRanges(error.line, suppressedRanges)
-                ) {
-                    continue;
-                }
-            }
-            diagnostics.push(this.syntaxErrorToDiagnostic(error));
-        }
-
-        return diagnostics;
+        return result.errors.map(error => this.syntaxErrorToDiagnostic(error, result.tokenStream));
     }
 
-    private syntaxErrorToDiagnostic(error: SyntaxError): Diagnostic {
-        let message = error.message;
-
-        // Improve "no viable alternative" / "mismatched input" messages
-        // when a reserved keyword is used where an identifier was expected.
+    private syntaxErrorToDiagnostic(error: SyntaxError, tokenStream: CommonTokenStream): Diagnostic {
+        // A reserved keyword used as a name gets a clear message; any other
+        // misplaced keyword keeps the parser's own message.
         const token = error.offendingSymbol;
-        if (token &&
-            token.type !== SysMLv2Lexer.IDENTIFIER &&
-            token.text &&
-            /^[a-z]+$/.test(token.text)) {
-            const word = token.text;
-            const suggestion = 'my' + word.charAt(0).toUpperCase() + word.slice(1);
-            message = `'${word}' is a reserved SysML keyword and cannot be used as a name. Consider renaming it (e.g., '${suggestion}').`;
-        }
+        const message = (token && keywordAsNameMessage(
+            this.visibleNeighbour(tokenStream, token.tokenIndex, -1),
+            token,
+            this.visibleNeighbour(tokenStream, token.tokenIndex, 1),
+        )) ?? error.message;
 
         return {
             severity: DiagnosticSeverity.Error,
@@ -111,76 +44,12 @@ export class DiagnosticsProvider {
         };
     }
 
-    /**
-     * Find 0-based line ranges of blocks where the ANTLR grammar has
-     * known limitations and syntax errors should be suppressed.
-     *
-     * Only suppress errors in blocks whose body text actually contains
-     * expression-level operators that the grammar cannot handle
-     * (arithmetic, unit, collection, or assignment operators).  Blocks
-     * without such operators will correctly report all syntax errors.
-     */
-    private findGrammarLimitationRanges(text: string): Array<{ startLine: number; endLine: number }> {
-        const ranges: Array<{ startLine: number; endLine: number }> = [];
-        // Match any block opened by a SysML keyword followed by `{`.
-        const re = /\b(part|attribute|item|port|action|state|constraint|requirement|analysis|calc|occurrence|interface|connection|allocation|flow|use|verification|individual|exhibit|view|viewpoint|concern|rendering|metadata)\b([^;{]*)\{/g;
-        let m: RegExpExecArray | null;
-
-        let lineOffsets: number[] | undefined;
-
-        while ((m = re.exec(text)) !== null) {
-            const open = m.index + m[0].length - 1;
-            let depth = 1;
-            let i = open + 1;
-            while (i < text.length && depth > 0) {
-                if (text[i] === '{') depth++;
-                if (text[i] === '}') depth--;
-                i++;
-            }
-            if (depth !== 0) continue;
-
-            // Extract the body text (between the braces, exclusive)
-            // and strip comments so that operators inside comments don't
-            // trigger false suppression.
-            const bodyText = stripComments(text.slice(open + 1, i - 1));
-
-            // Only suppress when the body actually contains expression
-            // operators the grammar cannot handle.
-            if (!EXPRESSION_OPERATOR_RE.test(bodyText)) {
-                continue;
-            }
-
-            if (!lineOffsets) {
-                lineOffsets = [0];
-                for (let j = 0; j < text.length; j++) {
-                    if (text[j] === '\n') lineOffsets.push(j + 1);
-                }
-            }
-
-            ranges.push({
-                startLine: this.offsetToLine(lineOffsets, open),
-                endLine: this.offsetToLine(lineOffsets, i - 1),
-            });
+    /** The nearest default-channel token before (`step` -1) or after (`step` 1) `index`. */
+    private visibleNeighbour(tokenStream: CommonTokenStream, index: number, step: -1 | 1): Token | undefined {
+        const tokens = tokenStream.getTokens();
+        for (let i = index + step; i >= 0 && i < tokens.length; i += step) {
+            if (tokens[i].channel === Token.DEFAULT_CHANNEL) return tokens[i];
         }
-        return ranges;
-    }
-
-    private offsetToLine(lineOffsets: number[], offset: number): number {
-        let lo = 0;
-        let hi = lineOffsets.length - 1;
-        while (lo < hi) {
-            const mid = (lo + hi + 1) >>> 1;
-            if (lineOffsets[mid] <= offset) lo = mid;
-            else hi = mid - 1;
-        }
-        return lo;
-    }
-
-    private isLineInRanges(line: number, ranges: Array<{ startLine: number; endLine: number }>): boolean {
-        return ranges.some(r => line >= r.startLine && line <= r.endLine);
-    }
-
-    private isLineAtEndOfRanges(line: number, ranges: Array<{ startLine: number; endLine: number }>): boolean {
-        return ranges.some(r => line === r.endLine);
+        return undefined;
     }
 }

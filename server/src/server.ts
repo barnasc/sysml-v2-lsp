@@ -261,9 +261,8 @@ function handleWorkerMessage(msg: any): void {
 
         documentManager.parse(currentDoc);
 
-        // Re-derive diagnostics from DiagnosticsProvider which applies
-        // grammar-limitation suppression.  This replaces the raw worker
-        // diagnostics with properly filtered ones.
+        // Re-derive syntax diagnostics from the main-thread parse, retaining
+        // the errors already reported by the worker.
         const correctedDiags = diagnosticsProvider.getDiagnostics(uri);
 
         // Re-add keyword diagnostics from the main-thread parse
