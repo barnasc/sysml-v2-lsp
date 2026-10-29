@@ -127,6 +127,8 @@ export interface SysMLSymbol {
     specializationNames: string[];
     /** Feature paths targeted by owned redefinitions, as written in the declaration. */
     redefinedFeatureTargets?: string[];
+    /** The source ranges of `redefinedFeatureTargets`, in the same order. */
+    redefinedFeatureTargetRanges?: Range[];
     /**
      * For a usage named after the feature it references (`perform a;`,
      * `variant part1;`, 8.3.6.4, 8.3.17.14): that reference, as written. Its

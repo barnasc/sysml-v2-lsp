@@ -25,7 +25,7 @@ import {
 const NAMES = [
     '\u03a9', '\u00b0C', 'm\u00b2', '\u6e29\u5ea6', '\u0645\u062d\u0631\u0643',
     'e\u0301', '\u00e9', '\u{1f680}', '\u{10400}', "unit's value", 'unit\\value',
-    'unit::value', 'unit, value', 'unit { value', 'unit\tvalue', 'unit\nvalue',
+    'unit::value', 'unit, value', 'unit { value', 'unit\tvalue', 'unit\nvalue', '  unit value   ',
 ];
 
 function setup(text: string, uri = 'file:///unicode.sysml') {

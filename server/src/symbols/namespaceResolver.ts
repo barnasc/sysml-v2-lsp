@@ -1,8 +1,9 @@
 /**
  * Namespace/import/visibility mechanics (SysML v2 §7.5): given a namespace,
  * what members does it actually have -- its own, plus whatever its `import`
- * statements bring in. This is the pure §7.5 model; standard-library/ISQ
- * type recognition builds on top of it in `typeResolution.ts`.
+ * statements bring in, plus, for a definition or usage, what it inherits
+ * (KerML 7.3.2.1). Standard-library/ISQ type recognition builds on top of it
+ * in `typeResolution.ts`.
  *
  * Shared between `SemanticValidator` (editor diagnostics) and
  * `SysMLModelProvider` (the `sysml/model` request's own diagnostics) so both
@@ -575,11 +576,9 @@ export class NamespaceResolver {
      *
      * Only covers a *qualified* reference reaching into a specialization's
      * own protected members this way (`resolveQualifiedNameFrom`'s
-     * multi-segment loop) -- an *unqualified* reference to a member a
-     * specialization inherits without qualifying it by the supertype's name
-     * is a broader §7.6 feature-inheritance question this resolver doesn't
-     * otherwise model (it deliberately covers only §7.5's own namespace/
-     * import mechanics), so that case isn't covered here.
+     * multi-segment loop); an *unqualified* reference to a member a
+     * specialization inherits resolves through its inherited memberships
+     * (`addInheritedMembers`).
      */
     private isProtectedVisibleFrom(start: NamespaceKey, owner: SysMLSymbol, indexes: SymbolIndexes): boolean {
         if (!(isDefinition(owner.kind) || isUsage(owner.kind))) return false;
@@ -689,7 +688,9 @@ export class NamespaceResolver {
      * its `import` statements — including, transitively, a further namespace's
      * own already-imported (and non-privately-imported) members, matching
      * §7.5.3's "imported memberships become members of the importing
-     * namespace" and its P2/Q re-import example. Cached per `indexes`.
+     * namespace" and its P2/Q re-import example. A definition or usage also has
+     * the members it inherits (`addInheritedMembers`), after its owned members and
+     * before its imported ones (KerML 8.2.3.5.3). Cached per `indexes`.
      */
     getResolvedMembers(namespace: NamespaceKey, indexes: SymbolIndexes): Map<string, ResolvedMember[]> {
         if (!this.resolvedMembersByIndexes) this.resolvedMembersByIndexes = new WeakMap();
@@ -757,6 +758,8 @@ export class NamespaceResolver {
         perIndexesCache.set(namespace, members);
 
         const owner = typeof namespace === 'string' ? indexes.byQualifiedName.get(namespace) : namespace;
+        // Inherited before imported: an inherited membership hides an imported one of the same name (KerML 7.3.2.1).
+        if (owner && (isDefinition(owner.kind) || isUsage(owner.kind))) this.addInheritedMembers(owner, indexes, addMember);
         const importTargets = owner?.importTargets ?? [];
         // §7.5.4: a package-level `filter` applies to every import of that package,
         // combined (AND) with any filter on the specific import itself.
@@ -772,6 +775,83 @@ export class NamespaceResolver {
         }
 
         return members;
+    }
+
+    /**
+     * Fold the memberships `type` inherits into `addMember` (KerML 7.3.2.1,
+     * 7.3.2.2, 8.3.3.1.10 `Type::inheritedMemberships`): the public and
+     * protected memberships of the types it specializes (`generalsOf`), their
+     * own inherited ones included, without the features redefined there
+     * (`removeRedefinedFeatures`): one another inherited membership's feature
+     * redefines, or one a feature `type` owns redefines, directly or indirectly.
+     */
+    private addInheritedMembers(type: SysMLSymbol, indexes: SymbolIndexes, addMember: (name: string, entry: ResolvedMember) => void): void {
+        const inheritable: [string, ResolvedMember][] = [];
+        for (const general of this.generalsOf(type, indexes)) {
+            for (const [name, entries] of this.getResolvedMembers(namespaceKeyOf(general), indexes)) {
+                for (const entry of entries) {
+                    if (entry.visibility !== 'private' && entry.symbol !== type) inheritable.push([name, entry]);
+                }
+            }
+        }
+        const redefinedByOwned = new Set((indexes.byParent.get(namespaceKeyOf(type)) ?? [])
+            .flatMap(owned => (owned.redefinedFeatureTargets ?? []).map(target => this.resolveRedefinedFeature(type, target, indexes).symbol))
+            .filter((feature): feature is SysMLSymbol => feature !== undefined));
+        const inheritedFeatures = new Set(inheritable.map(([, entry]) => entry.symbol));
+        const redefinedByInherited = new Set([...inheritedFeatures]
+            .flatMap(feature => [...this.allRedefinedFeaturesOf(feature, indexes)].filter(redefined => redefined !== feature)));
+        for (const [name, entry] of inheritable) {
+            if (redefinedByInherited.has(entry.symbol)) continue;
+            if ([...this.allRedefinedFeaturesOf(entry.symbol, indexes)].some(feature => redefinedByOwned.has(feature))) continue;
+            addMember(name, entry);
+        }
+    }
+
+    /**
+     * The types `type` specializes, each once: those it is typed by,
+     * subclassifies or subsets, resolved from the namespace owning it (KerML
+     * 8.2.3.5.2), and the features it redefines (`resolveRedefinedFeature`).
+     * Never `type` itself.
+     */
+    private generalsOf(type: SysMLSymbol, indexes: SymbolIndexes): SysMLSymbol[] {
+        const redefinedNames = type.redefinedFeatureTargets ?? [];
+        const owner = ownerOf(type, indexes);
+        const generals = [
+            ...[...new Set([...type.typeNames, ...type.specializationNames])]
+                .filter(name => !redefinedNames.includes(name))
+                .map(name => this.resolveQualifiedNameFrom(ownerKeyOf(type, indexes.byId), name, indexes)),
+            ...redefinedNames.map(name => owner ? this.resolveRedefinedFeature(owner, name, indexes).symbol : undefined),
+        ];
+        return [...new Set(generals.filter((general): general is SysMLSymbol => general !== undefined && general !== type))];
+    }
+
+    /**
+     * Resolve the feature named `name` that a feature of `owningType`
+     * redefines (KerML 8.2.3.5.1): the basic resolution of `name` with each
+     * type `owningType` specializes in turn as the local namespace, until one
+     * resolves -- not `owningType` itself, whose inherited members leave out
+     * the features its own features redefine.
+     */
+    resolveRedefinedFeature(owningType: SysMLSymbol, name: string, indexes: SymbolIndexes): NameResolution {
+        for (const general of this.generalsOf(owningType, indexes)) {
+            const resolution = this.resolveQualifiedReferenceFrom(namespaceKeyOf(general), name, indexes);
+            if (resolution.symbol || resolution.ambiguous) return resolution;
+        }
+        return { ambiguous: false };
+    }
+
+    /** `feature` and every feature it redefines, directly or indirectly (KerML 8.3.3.1.10 `allRedefinedFeaturesOf`). */
+    private allRedefinedFeaturesOf(feature: SysMLSymbol, indexes: SymbolIndexes): Set<SysMLSymbol> {
+        const all = new Set<SysMLSymbol>([feature]);
+        for (const current of all) {
+            const owner = ownerOf(current, indexes);
+            if (!owner) continue;
+            for (const target of current.redefinedFeatureTargets ?? []) {
+                const redefined = this.resolveRedefinedFeature(owner, target, indexes).symbol;
+                if (redefined) all.add(redefined);
+            }
+        }
+        return all;
     }
 
     /**

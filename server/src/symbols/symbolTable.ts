@@ -1281,7 +1281,7 @@ export class SymbolTable {
                 ? this.extractTransitionTypeNames(ctx)
                 : this.extractTypeNames(ctx);
         const specializationNames = this.extractSpecializationNames(ctx);
-        const redefinedFeatureTargets = this.extractRedefinedFeatureTargets(ctx);
+        const redefinitions = this.findRedefinitions(ctx);
         const namingReference = anonymous ? undefined : this.namingReference(ctx, kind)?.getText();
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
@@ -1322,7 +1322,8 @@ export class SymbolTable {
             typeName,
             typeNames,
             specializationNames,
-            redefinedFeatureTargets: redefinedFeatureTargets.length > 0 ? redefinedFeatureTargets : undefined,
+            redefinedFeatureTargets: redefinitions.length > 0 ? redefinitions.map(target => target.getText()) : undefined,
+            redefinedFeatureTargetRanges: redefinitions.length > 0 ? redefinitions.map(contextToRange) : undefined,
             namingReference,
             documentation,
             visibility,
@@ -1750,10 +1751,10 @@ export class SymbolTable {
         }
     }
 
-    private extractRedefinedFeatureTargets(ctx: ParserRuleContext): string[] {
+    private findRedefinitions(ctx: ParserRuleContext): ParserRuleContext[] {
         const targets: ParserRuleContext[] = [];
         this.findOwnHeaderRules(ctx, SysMLv2Parser.RULE_ownedRedefinition, targets);
-        return targets.map(target => target.getText());
+        return targets;
     }
 
     /**

@@ -73,9 +73,9 @@ export function splitQualifiedName(text: string): string[] {
     return parts;
 }
 
-/** Keep internal names readable, quoting only segments that would be ambiguous when joined. */
+/** Keep internal names readable, quoting only segments that would be ambiguous when joined or split again. */
 export function joinQualifiedName(parts: readonly string[]): string {
-    return parts.map(part => /::|['\\\r\n\t\b\f]/.test(part) ? quoteName(part) : part).join('::');
+    return parts.map(part => /::|['\\\r\n\t\b\f]|^\s|\s$/.test(part) ? quoteName(part) : part).join('::');
 }
 
 /** Read one basic or unrestricted source name at an exact UTF-16 offset. */

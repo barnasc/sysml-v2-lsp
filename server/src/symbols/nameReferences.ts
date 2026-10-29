@@ -3,7 +3,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { DocumentManager } from '../documentManager.js';
 import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
 import { joinQualifiedName, scanFeaturePaths } from '../utils/identUtils.js';
-import { buildSymbolIndexes, NameResolution, NamespaceResolver } from './namespaceResolver.js';
+import { buildSymbolIndexes, NameResolution, NamespaceResolver, ownerOf } from './namespaceResolver.js';
 import { isAnonymous, SysMLSymbol } from './sysmlElements.js';
 
 export interface NameReference extends Location {
@@ -67,6 +67,7 @@ export class NameReferences {
             if (target && !path.qualifiedNames.some(name => name.segments.some(segment =>
                 segment.name === target.name || segment.name === target.shortName))) continue;
             const namespace = namespaces.find(ns => ns.body < path.start && path.end <= ns.end);
+            const redefiningOwner = this.redefiningOwner(symbols, doc, path.start, path.end);
             let receiver: SysMLSymbol | undefined;
             let receiverAmbiguous = false;
             for (let group = 0; group < path.qualifiedNames.length; group++) {
@@ -105,6 +106,10 @@ export class NameReferences {
                             : { ambiguous: receiverAmbiguous };
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
+                    } else if (redefiningOwner) {
+                        const result = this.resolver.resolveRedefinedFeature(redefiningOwner, joinQualifiedName([segment.name]), this.indexes);
+                        resolved = result.symbol;
+                        ambiguous = result.ambiguous;
                     } else {
                         const result = this.resolver.resolveReferenceIn(
                             namespace?.symbol, joinQualifiedName([segment.name]), this.indexes, namedAfter);
@@ -125,4 +130,16 @@ export class NameReferences {
         }
         return refs;
     }
+
+    /**
+     * The type owning the feature whose redefinition target is the reference
+     * from `start` to `end` -- which KerML 8.2.3.5.1 resolves from that type's
+     * generals; else undefined.
+     */
+    private redefiningOwner(symbols: SysMLSymbol[], doc: TextDocument, start: number, end: number): SysMLSymbol | undefined {
+        const redefining = symbols.find(symbol => symbol.redefinedFeatureTargetRanges?.some(range =>
+            doc.offsetAt(range.start) <= start && end <= doc.offsetAt(range.end)));
+        return redefining && ownerOf(redefining, this.indexes);
+    }
+
 }
