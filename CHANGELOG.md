@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Security
+
+- Update transitive `body-parser` to 2.4.0 (CVE-2026-111181) and `ip-address` to 10.7.5 (CVE-2026-111997) to address denial-of-service advisories.
+
 ### Fixed
 
+- A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
+- A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
+- The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.
+- A flow payload's type is read from its typing only and as written: a payload subsetting a feature (`of p :> a.b`) has no type, and a qualified one (`of P::Fuel`) keeps its qualification.
 - A keyword in the wrong place (`attribute` after a missing `;`, `def` after `succession flow`) is now reported with the parser's own syntax error, not as "a reserved SysML keyword and cannot be used as a name".
 
 ## [0.39.0]
