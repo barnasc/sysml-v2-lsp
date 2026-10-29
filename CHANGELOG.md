@@ -2,12 +2,19 @@
 
 ## [Unreleased]
 
+### Security
+
+- Update transitive `body-parser` to 2.4.0 (CVE-2026-111181) and `ip-address` to 10.7.5 (CVE-2026-111997) to address denial-of-service advisories.
+
 ### Fixed
 
 - A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
 - The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.
 - A flow payload's type is read from its typing only and as written: a payload subsetting a feature (`of p :> a.b`) has no type, and a qualified one (`of P::Fuel`) keeps its qualification.
+- A single-quoted (unrestricted) name (`'my part'`) gets the same semantic token as a basic name (type, variable, …), not a `string` token; only a double-quoted literal is a `string` (KerML 8.2.2.3, 8.2.2.5).
+- The type after `specializes`, `defined by` or `typed by` is a `type` semantic token, as after `:>` or `:`, not a `variable`.
+- A keyword in the wrong place (`attribute` after a missing `;`, `def` after `succession flow`, a repeated `in` before a name) is now reported with the parser's own syntax error, not as "a reserved SysML keyword and cannot be used as a name".
 - A definition's or usage's members include the ones it inherits (KerML 7.3.2.1, 8.2.3.5.3, 8.3.3.1.10 `Type::inheritedMemberships`): the public and protected members of the types it specializes by typing, subclassification, subsetting or redefinition, less the features redefined there. An owned member comes first, an imported one after the inherited ones.
 - A redefined feature named after `:>>` or `redefines` is resolved from the types the redefining feature's owner specializes (KerML 8.2.3.5.1). `part part2R :>> part2;` inside `part part1S :> part1` now resolves to `part1`'s `part2` in go-to-definition, references and rename, rather than to an unrelated element of the same name elsewhere.
 
