@@ -12,6 +12,8 @@
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
 - The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.
 - A flow payload's type is read from its typing only and as written: a payload subsetting a feature (`of p :> a.b`) has no type, and a qualified one (`of P::Fuel`) keeps its qualification.
+- A single-quoted (unrestricted) name (`'my part'`) gets the same semantic token as a basic name (type, variable, …), not a `string` token; only a double-quoted literal is a `string` (KerML 8.2.2.3, 8.2.2.5).
+- The type after `specializes`, `defined by` or `typed by` is a `type` semantic token, as after `:>` or `:`, not a `variable`.
 - A keyword in the wrong place (`attribute` after a missing `;`, `def` after `succession flow`, a repeated `in` before a name) is now reported with the parser's own syntax error, not as "a reserved SysML keyword and cannot be used as a name".
 
 ## [0.39.0]
