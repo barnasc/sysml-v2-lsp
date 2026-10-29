@@ -452,9 +452,14 @@ export class NamespaceResolver {
         return this.resolveQualifiedNameFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes);
     }
 
-    /** Resolve an editor reference without losing the reason a name is unresolved. */
-    resolveReferenceIn(namespace: SysMLSymbol | undefined, name: string, indexes: SymbolIndexes): NameResolution {
-        return this.resolveQualifiedReferenceFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes);
+    /**
+     * Resolve an editor reference without losing the reason a name is unresolved.
+     * Its first segment is never resolved to `excluding`: a usage named after this
+     * reference (`SysMLSymbol.namingReference`), which is a member of the namespace
+     * the reference is resolved in, but never the feature it references.
+     */
+    resolveReferenceIn(namespace: SysMLSymbol | undefined, name: string, indexes: SymbolIndexes, excluding?: SysMLSymbol): NameResolution {
+        return this.resolveQualifiedReferenceFrom(namespace ? namespaceKeyOf(namespace) : '', name, indexes, excluding);
     }
 
     /** Resolve a public qualified or feature-path member, without enclosing-scope fallback. */
@@ -462,6 +467,24 @@ export class NamespaceResolver {
         const members = this.getResolvedMembers(namespaceKeyOf(owner), indexes).get(name);
         if (members && this.isAmbiguous(name, members, indexes)) return { ambiguous: true };
         return this.referenceTo(members?.find(member => member.visibility === 'public')?.symbol, indexes);
+    }
+
+    /** Resolve a feature of `receiver` in a feature chain: its own member, else one of its types'. */
+    resolveFeatureReference(receiver: SysMLSymbol, name: string, indexes: SymbolIndexes): NameResolution {
+        const queue = [receiver];
+        const visited = new Set<SysMLSymbol>();
+        for (let index = 0; index < queue.length; index++) {
+            const owner = queue[index];
+            if (visited.has(owner)) continue;
+            visited.add(owner);
+            const member = this.resolveMemberReference(owner, name, indexes);
+            if (member.symbol || member.ambiguous) return member;
+            for (const typeName of owner.typeNames) {
+                const type = this.resolveNameFrom(owner, typeName, indexes);
+                if (type && !visited.has(type)) queue.push(type);
+            }
+        }
+        return { ambiguous: false };
     }
 
     /**
@@ -478,12 +501,13 @@ export class NamespaceResolver {
         return this.resolveQualifiedReferenceFrom(start, name, indexes).symbol;
     }
 
-    private resolveQualifiedReferenceFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes): NameResolution {
+    private resolveQualifiedReferenceFrom(start: NamespaceKey, name: string, indexes: SymbolIndexes, excluding?: SysMLSymbol): NameResolution {
         const [first, ...rest] = splitQualifiedName(name);
 
         let resolved: SysMLSymbol | undefined;
         for (const ancestor of this.namespaceAncestorsOf(start, indexes)) {
-            const candidates = this.getResolvedMembers(ancestor, indexes).get(first);
+            const members = this.getResolvedMembers(ancestor, indexes).get(first);
+            const candidates = excluding ? members?.filter(member => member.symbol !== excluding) : members;
             if (candidates && candidates.length > 0) {
                 if (this.isAmbiguous(first, candidates, indexes)) return { ambiguous: true };
                 resolved = candidates[0].symbol;

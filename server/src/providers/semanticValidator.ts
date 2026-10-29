@@ -4,6 +4,7 @@ import { getLibraryPackageNames, resolveLibraryType } from '../library/libraryIn
 import { SysMLModelProvider } from '../model/sysmlModelProvider.js';
 import { NamespaceResolver, SymbolIndexes, buildSymbolIndexes, describeConflictingDeclarations, findConflictingDeclarations, NamespaceKey, namespaceKeyOf, otherDeclarations, ownerKeyOf, ownerOf } from '../symbols/namespaceResolver.js';
 import { SysMLElementKind, SysMLSymbol, displayName, isAnonymous, isDefinition } from '../symbols/sysmlElements.js';
+import { describeNamingIssue, NamingIssue } from '../symbols/symbolTable.js';
 import { resolveTypeName } from '../symbols/typeResolution.js';
 import { scanFeaturePaths, splitQualifiedName, stripComments } from '../utils/identUtils.js';
 
@@ -140,6 +141,7 @@ export class SemanticValidator {
         diagnostics.push(...this.checkPortCompatibility(text, uri, symbols, indexes));
         diagnostics.push(...this.checkConstraintBodyReferences(text, uri, symbols, indexes));
         diagnostics.push(...this.checkCircularSpecialization(symbols, indexes));
+        diagnostics.push(...this.checkNamingIssues(symbolTable.getNamingIssues(uri)));
         diagnostics.push(...this.checkUnsatisfiedRequirements(symbols, indexes));
         diagnostics.push(...this.checkUnverifiedRequirements(symbols, indexes));
         diagnostics.push(...this.checkViewpointSatisfaction(symbols, indexes));
@@ -479,6 +481,22 @@ export class SemanticValidator {
             visited.delete(tn);
         }
         return undefined;
+    }
+
+    /**
+     * Rule: unsettled effective names.
+     *
+     * A usage named after a feature it references whose names did not settle
+     * (`SymbolTable.getNamingIssues`): on a cycle of such usages, changing
+     * without settling, or still changing when the budget of rounds ran out.
+     */
+    private checkNamingIssues(issues: readonly NamingIssue[]): Diagnostic[] {
+        return issues.map(issue => ({
+            severity: DiagnosticSeverity.Warning,
+            range: issue.symbol.selectionRange,
+            source: 'sysml',
+            ...describeNamingIssue(issue),
+        }));
     }
 
     /**

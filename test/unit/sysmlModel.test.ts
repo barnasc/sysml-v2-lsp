@@ -310,6 +310,76 @@ package Demo {
             expect(rels.filter(r => r.type === 'verify' && r.source === 'sys' && r.sourceId === undefined)).toHaveLength(1);
         });
 
+        it('should report a usage without a kind keyword as `ref`, and an action\'s parameters as its children', async () => {
+            const model = await getModelForText(`
+package Test {
+    part def A;
+    action def Act {
+        in p1 : A;
+        out p2 : A;
+    }
+}
+`, ['elements', 'relationships']);
+
+            const act = model.elements!.find(e => e.name === 'Test')!.children.find(e => e.name === 'Act')!;
+            expect(act.children.map(c => [c.name, c.type])).toEqual([['p1', 'ref'], ['p2', 'ref']]);
+            expect(model.relationships!.filter(r => r.type === 'typing')).toEqual([
+                expect.objectContaining({ source: 'p1', target: 'A' }),
+                expect.objectContaining({ source: 'p2', target: 'A' }),
+            ]);
+        });
+
+        it('should report a variant naming a separately declared usage as a `ref` child of its variation', async () => {
+            const model = await getModelForText(`
+package Test {
+    item def ItemDef;
+    part part1 : ItemDef;
+    item item1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part1;
+        variant item1;
+    }
+}
+`, ['elements']);
+
+            const choice = model.elements!.find(e => e.name === 'Test')!.children.find(e => e.name === 'itemChoice')!;
+            expect(choice.children.map(c => [c.name, c.type])).toEqual([['part1', 'ref'], ['item1', 'ref']]);
+        });
+
+        it('should name a variant after a usage in another document, and again when that usage is renamed', async () => {
+            const { DocumentManager } = await import('../../server/src/documentManager.js');
+            const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+            const { TextDocument } = await import('vscode-languageserver-textdocument');
+            const variationUri = 'test://variation.sysml';
+            const libUri = 'test://lib.sysml';
+            const docManager = new DocumentManager();
+            docManager.parse(TextDocument.create(variationUri, 'sysml', 1,
+                'package Demo { private import Lib::*; item def I; variation item choice : I { variant p1; } }'));
+            docManager.parse(TextDocument.create(libUri, 'sysml', 1, 'package Lib { part <p1> part1; }'));
+            const provider = new SysMLModelProvider(docManager);
+            const variants = () => provider.getModel(variationUri, 1, ['elements']).elements![0].children
+                .find(e => e.name === 'choice')!.children.map(c => [c.name, c.displayName]);
+
+            expect(variants()).toEqual([['part1', 'part1']]);
+            docManager.parse(TextDocument.create(libUri, 'sysml', 2, 'package Lib { part <p1> part2; }'));
+            expect(variants()).toEqual([['part2', 'part2']]);
+        });
+
+        it('should report a variant named after itself through another variant', async () => {
+            const model = await getModelForText(`
+package Demo {
+    item def I;
+    variation item v1 : I { variant v2::a; }
+    variation item v2 : I { variant v1::a; }
+}
+`, ['diagnostics']);
+
+            expect(model.diagnostics!.filter(d => d.code === 'circular-naming').map(d => [d.elementName, d.severity, d.message])).toEqual([
+                ['a', 'warning', "Circular naming: 'a' is named after itself through 'Demo::v1::a' -> 'Demo::v2::a'."],
+                ['a', 'warning', "Circular naming: 'a' is named after itself through 'Demo::v2::a' -> 'Demo::v1::a'."],
+            ]);
+        });
+
         it('should report the workspace\'s symbol IDs, distinct for declarations clashing across documents', async () => {
             const { DocumentManager } = await import('../../server/src/documentManager.js');
             const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');

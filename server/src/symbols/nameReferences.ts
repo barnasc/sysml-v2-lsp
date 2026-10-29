@@ -80,10 +80,14 @@ export class NameReferences {
                     let after = segment.end;
                     while (before >= 0 && /\s/.test(text[before])) before--;
                     while (after < text.length && /\s/.test(text[after])) after++;
-                    const declaration = symbols.find(symbol => !isAnonymous(symbol) && (
-                        (symbol.selectionRange.start.line === range.start.line &&
-                            symbol.selectionRange.start.character === range.start.character &&
-                            symbol.selectionRange.end.character === range.end.character) ||
+                    const atName = (symbol: SysMLSymbol) => symbol.selectionRange.start.line === range.start.line &&
+                        symbol.selectionRange.start.character === range.start.character &&
+                        symbol.selectionRange.end.character === range.end.character;
+                    // `perform a;`, `variant part1;`: named after the feature this token
+                    // references, so the token is that reference, never the usage itself.
+                    const namedAfter = symbols.find(symbol => symbol.namingReference !== undefined && atName(symbol));
+                    const declaration = symbols.find(symbol => !isAnonymous(symbol) && symbol !== namedAfter && (
+                        atName(symbol) ||
                         (symbol.shortName === segment.name && text[before] === '<' && text[after] === '>' &&
                             doc.offsetAt(symbol.range.start) <= segment.start &&
                             segment.end < doc.offsetAt(symbol.selectionRange.start))));
@@ -97,13 +101,13 @@ export class NameReferences {
                             ambiguous = result.ambiguous;
                         }
                     } else if (group > 0) {
-                        const result: NameResolution = receiver ? this.resolveFeature(receiver, segment.name)
+                        const result: NameResolution = receiver ? this.resolver.resolveFeatureReference(receiver, segment.name, this.indexes)
                             : { ambiguous: receiverAmbiguous };
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
                     } else {
                         const result = this.resolver.resolveReferenceIn(
-                            namespace?.symbol, joinQualifiedName([segment.name]), this.indexes);
+                            namespace?.symbol, joinQualifiedName([segment.name]), this.indexes, namedAfter);
                         resolved = result.symbol;
                         ambiguous = result.ambiguous;
                     }
@@ -120,22 +124,5 @@ export class NameReferences {
             }
         }
         return refs;
-    }
-
-    private resolveFeature(receiver: SysMLSymbol, name: string): NameResolution {
-        const queue = [receiver];
-        const visited = new Set<SysMLSymbol>();
-        for (let index = 0; index < queue.length; index++) {
-            const owner = queue[index];
-            if (visited.has(owner)) continue;
-            visited.add(owner);
-            const member = this.resolver.resolveMemberReference(owner, name, this.indexes);
-            if (member.symbol || member.ambiguous) return member;
-            for (const typeName of owner.typeNames) {
-                const type = this.resolver.resolveNameFrom(owner, typeName, this.indexes);
-                if (type && !visited.has(type)) queue.push(type);
-            }
-        }
-        return { ambiguous: false };
     }
 }

@@ -1,14 +1,15 @@
-import { ParserRuleContext, TerminalNode, Token } from 'antlr4ng';
+import { ErrorNode, ParserRuleContext, ParseTree, TerminalNode, Token } from 'antlr4ng';
 import { Range } from 'vscode-languageserver/node';
 import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
 import { MultiplicityBoundsContext, OwnedExpressionContext, SysMLv2Parser } from '../generated/SysMLv2Parser.js';
 import { ParseResult } from '../parser/parseDocument.js';
 import { contextToRange, tokenToRange } from '../parser/positionUtils.js';
 import { SYSML_KEYWORDS } from '../utils/sysmlKeywords.js';
-import { joinQualifiedName, scanQualifiedNames, splitQualifiedName, unquoteName as decodeName } from '../utils/identUtils.js';
+import { joinQualifiedName, scanFeaturePaths, scanQualifiedNames, splitQualifiedName, unquoteName as decodeName } from '../utils/identUtils.js';
 import { IdRegistry } from './ids.js';
+import { buildSymbolIndexes, NamespaceResolver, SymbolIndexes } from './namespaceResolver.js';
 import { Scope } from './scope.js';
-import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, isAnonymous, isDefinition, isFlowUsage, isUsage as isUsageKind } from './sysmlElements.js';
+import { FilterExpr, ImportTarget, SysMLElementKind, SysMLSymbol, displayName, isAnonymous, isDefinition, isFlowUsage, isUsage as isUsageKind } from './sysmlElements.js';
 
 // ── ruleIndex-based lookup tables ───────────────────────────────────
 // These replace the toLowerCase() + string-comparison chains with O(1)
@@ -66,6 +67,12 @@ const RULE_INDEX_TO_KIND = new Map<number, SysMLElementKind>([
     [SysMLv2Parser.RULE_subjectUsage, SysMLElementKind.SubjectUsage],             // 388
     [SysMLv2Parser.RULE_stakeholderUsage, SysMLElementKind.StakeholderUsage],     // 397
     [SysMLv2Parser.RULE_referenceUsage, SysMLElementKind.RefUsage],               // 213
+    // A usage without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`) is a
+    // reference usage, `ref` being optional (7.6.4, 8.2.2.6.3 DefaultReferenceUsage).
+    [SysMLv2Parser.RULE_defaultReferenceUsage, SysMLElementKind.RefUsage],
+    // A variant naming a separately declared usage (`variant part1;`) is a
+    // reference usage too (7.6.7, 8.2.2.6.3 VariantReference).
+    [SysMLv2Parser.RULE_variantReference, SysMLElementKind.RefUsage],
     [SysMLv2Parser.RULE_interfaceUsage, SysMLElementKind.InterfaceUsage],         // 268
     [SysMLv2Parser.RULE_performActionUsage, SysMLElementKind.PerformActionUsage], // 298
     // A state's `entry`/`do`/`exit` action (`exit action a : A;`, `exit a;`): the
@@ -116,6 +123,107 @@ const PERFORMING_USAGE_KINDS: ReadonlySet<SysMLElementKind> = new Set([
     SysMLElementKind.ExhibitStateUsage,
     SysMLElementKind.IncludeUseCaseUsage,
 ]);
+
+/** A usage's effective name and short name, those of the feature it is named after. */
+interface EffectiveName {
+    readonly name: string;
+    readonly shortName?: string;
+}
+
+/**
+ * Why a usage named after a feature it references (`namingReference`) has no
+ * settled effective name (`SymbolTable.getNamingIssues`).
+ */
+export type NamingIssue =
+    /** Its naming feature is, through usages named after features they reference, named after it; it keeps the names it has. */
+    | { readonly reason: 'cycle'; readonly symbol: SysMLSymbol; readonly cycle: readonly SysMLSymbol[] }
+    /** Its names change again to ones it already had, without ever settling. */
+    | { readonly reason: 'unstable'; readonly symbol: SysMLSymbol }
+    /** Its names still changed after the budget of rounds (`refreshNamingFeatures`) ran out. */
+    | { readonly reason: 'limit'; readonly symbol: SysMLSymbol; readonly rounds: number };
+
+/** The diagnostic code and message reporting `issue`. */
+export function describeNamingIssue(issue: NamingIssue): { code: string; message: string } {
+    const name = `'${displayName(issue.symbol)}'`;
+    switch (issue.reason) {
+        case 'cycle':
+            return {
+                code: 'circular-naming',
+                message: `Circular naming: ${name} is named after itself through ${issue.cycle.map(s => `'${s.qualifiedName ?? displayName(s)}'`).join(' -> ')}.`,
+            };
+        case 'unstable':
+            return { code: 'circular-naming', message: `Circular naming: the names of ${name} keep changing without settling.` };
+        case 'limit':
+            return {
+                code: 'naming-resolution-limit',
+                message: `The names of ${name} did not settle within ${issue.rounds} rounds of name resolution; it is named '${issue.symbol.name}' for now.`,
+            };
+    }
+}
+
+/** By document, its effective names keyed by `rangeKey`. */
+type EffectiveNamesByUri = Map<string, Map<string, EffectiveName>>;
+
+/** A declaration's key within its document: where its range starts. */
+function rangeKey(range: Range): string {
+    return `${range.start.line}:${range.start.character}`;
+}
+
+/** The effective names of all documents as one string, the same for the same names. */
+function effectiveNamesState(effectiveNames: ReadonlyMap<string, ReadonlyMap<string, EffectiveName>>): string {
+    const entries = [...effectiveNames]
+        .flatMap(([uri, names]) => [...names].map(([key, { name, shortName }]) => [uri, key, name, shortName ?? null]))
+        .sort((a, b) => `${a[0]}\0${a[1]}`.localeCompare(`${b[0]}\0${b[1]}`));
+    return JSON.stringify(entries);
+}
+
+/** Whether two documents' effective names, either missing when it has none, are the same. */
+function sameEffectiveNames(a: ReadonlyMap<string, EffectiveName> | undefined, b: ReadonlyMap<string, EffectiveName> | undefined): boolean {
+    if ((a?.size ?? 0) !== (b?.size ?? 0)) return false;
+    for (const [key, names] of a ?? []) {
+        const other = b?.get(key);
+        if (other?.name !== names.name || other.shortName !== names.shortName) return false;
+    }
+    return true;
+}
+
+/** The name of the last segment of a reference: the name of the feature it ends at. */
+function lastSegmentName(reference: string): string | undefined {
+    return [...scanQualifiedNames(reference)].at(-1)?.segments.at(-1)?.name;
+}
+
+/**
+ * `symbol`'s effective names, named after `feature`: those of `feature`, or
+ * undefined when they are the reference as written or `feature` is anonymous.
+ */
+function namedAfter(symbol: SysMLSymbol, feature: SysMLSymbol): EffectiveName | undefined {
+    if (isAnonymous(feature)) return undefined;
+    if (feature.name === lastSegmentName(symbol.namingReference!) && feature.shortName === undefined) return undefined;
+    return { name: feature.name, shortName: feature.shortName };
+}
+
+/**
+ * Each usage on a cycle of usages named after one another, with that cycle
+ * starting at it; `features` maps each usage to its naming feature.
+ */
+function namingCycles(features: ReadonlyMap<SysMLSymbol, SysMLSymbol>): Map<SysMLSymbol, SysMLSymbol[]> {
+    const cycles = new Map<SysMLSymbol, SysMLSymbol[]>();
+    const visited = new Set<SysMLSymbol>();
+    for (const start of features.keys()) {
+        const path: SysMLSymbol[] = [];
+        let symbol: SysMLSymbol | undefined = start;
+        while (symbol && !visited.has(symbol)) {
+            visited.add(symbol);
+            path.push(symbol);
+            symbol = features.get(symbol);
+        }
+        const at = symbol ? path.indexOf(symbol) : -1;
+        if (at < 0) continue;
+        const cycle = path.slice(at);
+        cycle.forEach((member, i) => cycles.set(member, [...cycle.slice(i), ...cycle.slice(0, i)]));
+    }
+    return cycles;
+}
 
 /** Rules whose children contain a name (identification, name, qualifiedName) */
 const NAME_RULE_INDICES: ReadonlySet<number> = new Set([
@@ -283,8 +391,20 @@ export class SymbolTable {
     private allSymbolsCache: SysMLSymbol[] | undefined;
     /** The global scope */
     private globalScope: Scope;
+    /** Each document's parse tree, to build it again with other effective names (`refreshNamingFeatures`) */
+    private trees = new Map<string, ParserRuleContext>();
+    /** Each document's effective names it was last built with (`resolveNamingFeatures`) */
+    private effectiveNamesByUri = new Map<string, Map<string, EffectiveName>>();
+    /** While a document is built: its effective names */
+    private effectiveNames: Map<string, EffectiveName> | undefined;
+    /** The usages whose effective names did not settle when last refreshed (`refreshNamingFeatures`) */
+    private namingIssues: NamingIssue[] = [];
 
-    constructor() {
+    /**
+     * @param namingRounds the budget of rounds of `refreshNamingFeatures`,
+     * instead of the one it derives from the usages it names
+     */
+    constructor(private readonly namingRounds?: number) {
         this.globalScope = new Scope('__global__');
     }
 
@@ -292,15 +412,39 @@ export class SymbolTable {
      * Build the symbol table from a parse result.
      */
     build(uri: string, parseResult: ParseResult): void {
+        this.buildDocument(uri, parseResult);
+        this.refreshNamingFeatures();
+    }
+
+    /** Build the symbol table from the parse results of several documents. */
+    buildAll(documents: Iterable<[uri: string, parseResult: ParseResult]>): void {
+        for (const [uri, parseResult] of documents) this.buildDocument(uri, parseResult);
+        this.refreshNamingFeatures();
+    }
+
+    /** Build `uri`'s symbols, each named as written (`refreshNamingFeatures`). */
+    private buildDocument(uri: string, parseResult: ParseResult): void {
         // Clear previous entries for this URI
         this.clearUri(uri);
+        this.trees.delete(uri);
+        this.effectiveNamesByUri.delete(uri);
 
         if (!parseResult.tree) {
             return;
         }
 
-        // Walk the tree and collect symbols
-        this.walkTree(parseResult.tree, uri, this.globalScope, undefined);
+        this.trees.set(uri, parseResult.tree);
+        this.collect(uri, parseResult.tree);
+    }
+
+    /** Walk `tree` for `uri`'s symbols, and give them their symbol IDs. */
+    private collect(uri: string, tree: ParserRuleContext): void {
+        this.effectiveNames = this.effectiveNamesByUri.get(uri);
+        try {
+            this.walkTree(tree, uri, this.globalScope, undefined);
+        } finally {
+            this.effectiveNames = undefined;
+        }
 
         // Post-process: resolve view specialization chains to inherit
         // filters, rendering, and expose targets from parent view defs
@@ -308,6 +452,120 @@ export class SymbolTable {
         const declarations = this.symbolsByUri.get(uri) ?? [];
         this.ids.add(declarations);
         this.refreshMergedPackages(declarations);
+    }
+
+    /**
+     * Build again each document whose usages named after a feature they
+     * reference (`namingReference`) now have other effective names
+     * (`resolveNamingFeatures`), until none does: a document's names may
+     * depend on another's. A round settles at least one more usage of an
+     * acyclic chain of such usages, so the budget is a round per such usage,
+     * and one more. It stops early when the names come back to ones it
+     * already built with; either way, it records the usages left unsettled
+     * (`getNamingIssues`).
+     */
+    private refreshNamingFeatures(): void {
+        const budget = this.namingRounds
+            ?? this.getAllSymbolsIncludingDuplicates().filter(s => s.namingReference !== undefined).length + 1;
+        const built = new Set([effectiveNamesState(this.effectiveNamesByUri)]);
+        for (let rounds = 0; ; rounds++) {
+            const { effectiveNames, cycles } = this.resolveNamingFeatures();
+            const state = effectiveNamesState(effectiveNames);
+            const settled = state === effectiveNamesState(this.effectiveNamesByUri);
+            if (settled || built.has(state) || rounds === budget) {
+                const unsettled = settled ? [] : this.unsettledNamingUsages(effectiveNames);
+                this.namingIssues = [
+                    ...cycles,
+                    ...unsettled.map((symbol): NamingIssue => built.has(state)
+                        ? { reason: 'unstable', symbol }
+                        : { reason: 'limit', symbol, rounds }),
+                ];
+                return;
+            }
+            built.add(state);
+            for (const [uri, tree] of this.trees) {
+                const names = effectiveNames.get(uri);
+                if (sameEffectiveNames(names, this.effectiveNamesByUri.get(uri))) continue;
+                this.clearUri(uri);
+                if (names) this.effectiveNamesByUri.set(uri, names);
+                else this.effectiveNamesByUri.delete(uri);
+                this.collect(uri, tree);
+            }
+        }
+    }
+
+    /** The usages whose effective names in `effectiveNames` differ from the ones they were built with. */
+    private unsettledNamingUsages(effectiveNames: EffectiveNamesByUri): SysMLSymbol[] {
+        return [...this.trees.keys()].flatMap(uri => {
+            const names = effectiveNames.get(uri);
+            const builtNames = this.effectiveNamesByUri.get(uri);
+            return this.getSymbolsForUri(uri).filter(symbol => {
+                if (symbol.namingReference === undefined) return false;
+                const key = rangeKey(symbol.range);
+                const [a, b] = [names?.get(key), builtNames?.get(key)];
+                return a?.name !== b?.name || a?.shortName !== b?.shortName;
+            });
+        });
+    }
+
+    /**
+     * By document, the effective name and short name of each usage named after
+     * a feature it references (`namingReference`) whose names differ from the
+     * reference as written: those of that feature (7.6.5, 8.3.6.4, 8.3.17.14),
+     * whichever of its names the reference uses. Keyed by `rangeKey`. A
+     * reference to no feature in this table keeps its names as written; a
+     * usage on a cycle of usages named after one another keeps the names it
+     * was built with, and is reported in `cycles`.
+     */
+    private resolveNamingFeatures(): { effectiveNames: EffectiveNamesByUri; cycles: NamingIssue[] } {
+        const effectiveNames: EffectiveNamesByUri = new Map();
+        const named = this.getAllSymbolsIncludingDuplicates().filter(s => s.namingReference !== undefined);
+        if (named.length === 0) return { effectiveNames, cycles: [] };
+        const indexes = buildSymbolIndexes(this.getAllSymbols());
+        const resolver = new NamespaceResolver();
+        const features = new Map<SysMLSymbol, SysMLSymbol>();
+        for (const symbol of named) {
+            const feature = this.resolveNamingFeature(symbol, resolver, indexes);
+            if (feature) features.set(symbol, feature);
+        }
+        const cycles = namingCycles(features);
+        for (const [symbol, feature] of features) {
+            const key = rangeKey(symbol.range);
+            const effectiveName = cycles.has(symbol)
+                ? this.effectiveNamesByUri.get(symbol.uri)?.get(key)
+                : namedAfter(symbol, feature);
+            if (!effectiveName) continue;
+            const names = effectiveNames.get(symbol.uri) ?? new Map<string, EffectiveName>();
+            names.set(key, effectiveName);
+            effectiveNames.set(symbol.uri, names);
+        }
+        return {
+            effectiveNames,
+            cycles: [...cycles].map(([symbol, cycle]): NamingIssue => ({ reason: 'cycle', symbol, cycle })),
+        };
+    }
+
+    /** The usages of `uri` whose effective names did not settle when last built, and why. */
+    getNamingIssues(uri: string): NamingIssue[] {
+        return this.namingIssues.filter(issue => issue.symbol.uri === uri);
+    }
+
+    /**
+     * The feature `symbol`'s `namingReference` resolves to, in its owner's
+     * namespace and never to `symbol` itself; through a feature chain, each
+     * feature after the first is a feature of the one before it.
+     */
+    private resolveNamingFeature(symbol: SysMLSymbol, resolver: NamespaceResolver, indexes: SymbolIndexes): SysMLSymbol | undefined {
+        const [path] = scanFeaturePaths(symbol.namingReference!);
+        if (!path) return undefined;
+        const [first, ...chain] = path.qualifiedNames;
+        let feature = resolver.resolveReferenceIn(this.getOwner(symbol), first.name, indexes, symbol).symbol;
+        for (const qualified of chain) {
+            const [member, ...rest] = qualified.segments;
+            feature = feature && resolver.resolveFeatureReference(feature, member.name, indexes).symbol;
+            for (const segment of rest) feature = feature && resolver.resolveMemberReference(feature, segment.name, indexes).symbol;
+        }
+        return feature;
     }
 
     /**
@@ -510,6 +768,9 @@ export class SymbolTable {
     removeUri(uri: string): void {
         this.clearUri(uri);
         this.symbolsByUri.delete(uri);
+        this.trees.delete(uri);
+        this.effectiveNamesByUri.delete(uri);
+        this.refreshNamingFeatures();
     }
 
     private clearUri(uri: string): void {
@@ -968,6 +1229,11 @@ export class SymbolTable {
         if (kind === undefined) {
             return undefined;
         }
+        // `verify r;` outside a requirement body: the parser drops `verify` and
+        // reads `r;` as a usage without a kind keyword, which was never declared.
+        if (ctx.ruleIndex === SysMLv2Parser.RULE_defaultReferenceUsage && this.followsSkippedTokens(ctx)) {
+            return undefined;
+        }
 
         const range = contextToRange(ctx);
         const transition = kind === SysMLElementKind.TransitionUsage
@@ -977,7 +1243,9 @@ export class SymbolTable {
             ? this.extractFlowDetails(ctx)
             : undefined;
 
-        const declaredName = transition ? transition.declaredName : this.extractName(ctx);
+        const effectiveName = this.effectiveNames?.get(rangeKey(range));
+        const declaredName = effectiveName ? effectiveName.name
+            : transition ? transition.declaredName : this.extractName(ctx);
         // An anonymous transition, flow, connection, interface or allocation usage still gets a
         // symbol, with an empty name and its declaration (`anonymousDeclaration`); without a
         // declared name, only an element with a declaration to identify it by gets one.
@@ -985,15 +1253,16 @@ export class SymbolTable {
         const specializationPart = declaration === undefined ? undefined
             : this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_featureSpecializationPart)
                 ?? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_subclassificationPart);
-        if (!declaredName && !declaration) {
+        if (!declaredName && declaration === undefined) {
             return undefined;
         }
         const anonymous = !declaredName;
         const name = declaredName ?? '';
         // Transitions never carry a declared <shortName> alias.
-        const shortName = transition || (isFlowUsage(kind) && !declaredName)
-            ? undefined
-            : this.extractShortName(ctx);
+        const shortName = effectiveName ? effectiveName.shortName
+            : transition || (isFlowUsage(kind) && !declaredName)
+                ? undefined
+                : this.extractShortName(ctx);
 
         // KerML: only an element that is named, like all its owners, has a qualified name.
         const qualifiedName = anonymous || (owner && owner.qualifiedName === undefined)
@@ -1013,6 +1282,7 @@ export class SymbolTable {
                 : this.extractTypeNames(ctx);
         const specializationNames = this.extractSpecializationNames(ctx);
         const redefinedFeatureTargets = this.extractRedefinedFeatureTargets(ctx);
+        const namingReference = anonymous ? undefined : this.namingReference(ctx, kind)?.getText();
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
         const visibility = this.extractVisibility(ctx);
@@ -1053,6 +1323,7 @@ export class SymbolTable {
             typeNames,
             specializationNames,
             redefinedFeatureTargets: redefinedFeatureTargets.length > 0 ? redefinedFeatureTargets : undefined,
+            namingReference,
             documentation,
             visibility,
             source: transition?.source,
@@ -1070,6 +1341,33 @@ export class SymbolTable {
             importTargets: importTargets && importTargets.length > 0 ? importTargets : undefined,
             filterConditions: filterConditions && filterConditions.length > 0 ? filterConditions : undefined,
         };
+    }
+
+    /**
+     * Whether the token right before `ctx` was skipped by the parser to
+     * recover from a syntax error (an error node), so that `ctx` is the rest
+     * of an invalid statement rather than a declaration of its own.
+     */
+    private followsSkippedTokens(ctx: ParserRuleContext): boolean {
+        for (let node: ParserRuleContext = ctx; node.parent; node = node.parent) {
+            const siblings = node.parent.children;
+            for (let i = siblings.indexOf(node) - 1; i >= 0; i--) {
+                const last = this.lastLeaf(siblings[i]);
+                if (last) return last instanceof ErrorNode;
+            }
+        }
+        return false;
+    }
+
+    /** The last token node of `tree`, if it has any. */
+    private lastLeaf(tree: ParseTree): TerminalNode | undefined {
+        if (tree instanceof TerminalNode) return tree;
+        if (!(tree instanceof ParserRuleContext)) return undefined;
+        for (let i = tree.children.length - 1; i >= 0; i--) {
+            const leaf = this.lastLeaf(tree.children[i]);
+            if (leaf) return leaf;
+        }
+        return undefined;
     }
 
     /**
@@ -1370,9 +1668,11 @@ export class SymbolTable {
 
     /**
      * The declaration (`SysMLSymbol.declaration`) of a definition or usage
-     * without a declared name, as written. Undefined for any other
-     * element, and for an untyped transition without a source and target
-     * state. Its name is empty; it is identified by its `symbolId`.
+     * without a declared name, as written; its name is empty and it is
+     * identified by its `symbolId`. Undefined, so no symbol, for any other
+     * element and for an untyped transition without a source and target
+     * state. A reference usage's may be empty, `{ ... }` or a lone `;`
+     * (8.2.2.2, 8.2.2.6.2-8.2.2.6.3), and still gives it a symbol.
      */
     private anonymousDeclaration(
         ctx: ParserRuleContext,
@@ -1381,14 +1681,16 @@ export class SymbolTable {
     ): string | undefined {
         if (!isDefinition(kind) && !isUsageKind(kind)) return undefined;
         if (transition && !(transition.source && transition.target) && this.extractTransitionTypeNames(ctx).length === 0) return undefined;
-        return this.declarationText(ctx);
+        const declaration = this.declarationText(ctx);
+        return kind === SysMLElementKind.RefUsage ? declaration ?? '' : declaration;
     }
 
     /**
      * A definition's or usage's name: the one it declares itself, else the
      * name of its naming feature (KerML/SysML effective name, 7.6.5) -- the
-     * element it performs, exhibits or includes (8.3.17.14), or the feature it
-     * redefines. Undefined when it has neither, i.e. when it is anonymous.
+     * element it performs, exhibits or includes (8.3.17.14), the usage a
+     * variant reference names (8.3.6.4), or the feature it redefines.
+     * Undefined when it has neither, i.e. when it is anonymous.
      */
     private extractOwnName(ctx: ParserRuleContext, kind: SysMLElementKind): string | undefined {
         // A flow in the feature form (`flow f : F of ...`) names itself in a featureIdentification.
@@ -1397,11 +1699,20 @@ export class SymbolTable {
         const declaredName = identification && this.parseIdentification(identification).name;
         if (declaredName) return declaredName;
 
-        const performed = PERFORMING_USAGE_KINDS.has(kind)
-            ? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedReferenceSubsetting)
-            : undefined;
-        const namingFeature = performed ?? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedRedefinition);
+        const namingFeature = this.namingReference(ctx, kind) ?? this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedRedefinition);
         return namingFeature ? this.lastNameSegment(namingFeature) : undefined;
+    }
+
+    /**
+     * The reference a usage without a declared name is named after: the element
+     * it performs, exhibits or includes (8.3.17.14), or the usage a variant
+     * reference names (8.3.6.4). Undefined for any other usage.
+     */
+    private namingReference(ctx: ParserRuleContext, kind: SysMLElementKind): ParserRuleContext | undefined {
+        if (!PERFORMING_USAGE_KINDS.has(kind) && ctx.ruleIndex !== SysMLv2Parser.RULE_variantReference) return undefined;
+        const identification = this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_identification);
+        if (identification && this.parseIdentification(identification).name) return undefined;
+        return this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_ownedReferenceSubsetting);
     }
 
     /**
@@ -1474,8 +1785,7 @@ export class SymbolTable {
 
     /** The name of the feature a reference such as `a.b` or `P::a` ends at (`b`, `a`). */
     private lastNameSegment(reference: ParserRuleContext): string | undefined {
-        const names = [...scanQualifiedNames(reference.getText())];
-        return names.at(-1)?.segments.at(-1)?.name;
+        return lastSegmentName(reference.getText());
     }
 
     private declarationTokens(ctx: ParserRuleContext): Token[] {
