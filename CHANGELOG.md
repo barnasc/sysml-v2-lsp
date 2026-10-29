@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- Update transitive `body-parser` to 2.4.0 (CVE-2026-111181) and `ip-address` to 10.7.5 (CVE-2026-111997) to address denial-of-service advisories.
+
 ### Fixed
 
 - A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
