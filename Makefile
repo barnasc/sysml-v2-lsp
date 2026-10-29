@@ -82,7 +82,7 @@ clean: ## Clean build artifacts
 	npm run clean
 
 GRAMMAR_REPO := daltskin/sysml-v2-grammar
-GRAMMAR_BRANCH := v2026.08.1
+GRAMMAR_BRANCH := v2026.09.0
 GRAMMAR_BASE_URL := https://raw.githubusercontent.com/$(GRAMMAR_REPO)/$(GRAMMAR_BRANCH)/grammar
 
 update-grammar: ## Pull pinned grammar release, rebuild parser, and regenerate DFA snapshot

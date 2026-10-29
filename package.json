@@ -167,7 +167,7 @@
     "package": "npx --yes @vscode/vsce@3.9.2 package",
     "package:server": "npm run build:production && npm pack",
     "clean": "rm -rf clients/vscode/out server/out dist *.vsix *.tgz",
-    "update-grammar": "curl -fsSL https://raw.githubusercontent.com/daltskin/sysml-v2-grammar/main/grammar/SysMLv2Lexer.g4 -o grammar/SysMLv2Lexer.g4 && curl -fsSL https://raw.githubusercontent.com/daltskin/sysml-v2-grammar/main/grammar/SysMLv2Parser.g4 -o grammar/SysMLv2Parser.g4 && echo '✅ Grammar files updated from daltskin/sysml-v2-grammar'",
+    "update-grammar": "make update-grammar",
     "bench": "tsx benchmarks/src/runner.ts",
     "bench:compare": "tsx benchmarks/src/compare.ts",
     "bench:history": "tsx benchmarks/src/reporters/historyReporter.ts",
