@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A keyword in the wrong place (`attribute` after a missing `;`, `def` after `succession flow`) is now reported with the parser's own syntax error, not as "a reserved SysML keyword and cannot be used as a name".
+
 ## [0.39.0]
 
 ### Fixed
