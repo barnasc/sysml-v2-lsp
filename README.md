@@ -259,13 +259,15 @@ If the base cannot be benchmarked (for example, when a PR changes server APIs th
 
 ## Grammar Updates
 
-The grammar files in `grammar/` are sourced from [daltskin/sysml-v2-grammar](https://github.com/daltskin/sysml-v2-grammar). To pull the latest version, rebuild the parser, and regenerate the DFA snapshot:
+The grammar files in `grammar/` are sourced from [daltskin/sysml-v2-grammar](https://github.com/daltskin/sysml-v2-grammar), pinned to `v2026.09.0` by `GRAMMAR_BRANCH` in the [Makefile](Makefile). To refresh that release, rebuild the parser, and regenerate the DFA snapshot:
 
 ```bash
 make update-grammar
 ```
 
-This fetches the `.g4` files, runs `npm run build`, and regenerates the DFA snapshot that eliminates the ANTLR4 cold-start penalty. If you edit grammar files manually, run `make dfa` afterwards.
+This fetches the pinned `.g4` files, runs `npm run build`, regenerates the DFA snapshot that eliminates the ANTLR4 cold-start penalty, and recompiles it. `npm run update-grammar` delegates to this same workflow and also requires Make. Run `npm run build` afterwards to include the new snapshot in the server bundles.
+
+To adopt a newer release, update `GRAMMAR_BRANCH` first. Do not edit downloaded grammar files, generated parser outputs or the DFA snapshot by hand: grammar corrections belong in the upstream generator. `make dfa` rebuilds the parser and regenerates just the snapshot from the current grammar.
 
 ## Technology Stack
 

@@ -47,6 +47,56 @@ describe('Parser', () => {
         expect(parseDocument('package Test { import Library::*; }').errors.length).toBeGreaterThan(0);
     });
 
+    // Upstream Fix 54 bridges the formal SysML 2.0 8.2.2.9.2/8.2.2.17 BNF gap:
+    // nonBehaviorBodyItem admits endOccurrenceUsageElement, as the Pilot and
+    // September's Flows::messages require.
+    it('should parse the September Flows::messages typed ends', async () => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        const { SysMLv2Parser } = await import('../../server/src/generated/SysMLv2Parser.js');
+        const result = parseDocument(`package Flows {
+    abstract action messages : Message[0..*] nonunique :> transfers, actions {
+        end occurrence source : Occurrence :>> Message::source, transfers::source;
+        end occurrence target : Occurrence :>> Message::target, transfers::target;
+    }
+}`);
+        expect(result.errors.map(error => error.message)).toEqual([]);
+        expect(result.tree).not.toBeNull();
+        const pending: import('antlr4ng').ParseTree[] = [result.tree!];
+        let ends = 0;
+        while (pending.length > 0) {
+            const node = pending.pop()!;
+            if ('ruleIndex' in node && node.ruleIndex === SysMLv2Parser.RULE_endOccurrenceUsageElement) ends++;
+            for (let i = 0; i < node.getChildCount(); i++) {
+                const child = node.getChild(i);
+                if (child) pending.push(child);
+            }
+        }
+        expect(ends).toBe(2);
+    });
+
+    it.each([
+        'action def A', 'action a', 'state def S', 'state s', 'calc def C',
+        'calc c', 'analysis def A', 'analysis a', 'use case def U', 'verification def V',
+    ])('should accept a typed end in %s', async owner => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        expect(parseDocument(`package P {
+    ${owner} {
+        private end occurrence source : Occurrence :>> Base::source;
+    }
+}`).errors.map(error => error.message)).toEqual([]);
+    });
+
+    it.each([
+        'end occurrence source : ;',
+        'end occurrence source : Occurrence :>> ;',
+        'end [0..] occurrence source : Occurrence;',
+        'end end occurrence source : Occurrence;',
+        'end occurrence source : Occurrence',
+    ])('should still reject malformed typed end %s', async declaration => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        expect(parseDocument(`package P { action a { ${declaration} } }`).errors.length).toBeGreaterThan(0);
+    });
+
     it('should return a token stream', async () => {
         const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
         const result = parseDocument('package Test { }');

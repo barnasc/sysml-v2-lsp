@@ -8,6 +8,8 @@
 
 ### Fixed
 
+- Update the pinned grammar to `v2026.09.0` and regenerate the parser and DFA snapshot. Typed ends such as `end occurrence source : Occurrence;` now parse in shared behavior bodies, including September's `Flows::messages`. This adopts [upstream Fix 54](https://github.com/daltskin/sysml-v2-grammar/blob/v2026.09.0/grammar/PATCHES.md#fix-54-allow-typed-ends-in-shared-non-behavior-body-items), an intentional compatibility extension to formal SysML 2.0 8.2.2.6.2, 8.2.2.9.2 and 8.2.2.17, which omit that typed-end route.
+- Make `npm run update-grammar` use the same pinned parser/DFA refresh workflow as `make update-grammar`, rather than downloading the moving upstream main branch.
 - Preserve syntax errors beside expressions, quoted names and notes in editor diagnostics and `sysml/validateText`, removing obsolete block-wide grammar-limitation suppression (#154). Valid arithmetic is already supported by the grammar's `ownedExpression` production.
 - A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
