@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Preserve syntax errors beside expressions, quoted names and notes in editor diagnostics and `sysml/validateText`, removing obsolete block-wide grammar-limitation suppression (#154). Valid arithmetic is already supported by the grammar's `ownedExpression` production.
 - A flow definition (`flow def`) gets a symbol, owning its members, so a flow usage typed by it is no longer reported as `unresolved-type`.
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
 - The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.
@@ -17,6 +18,14 @@
 - A keyword in the wrong place (`attribute` after a missing `;`, `def` after `succession flow`, a repeated `in` before a name) is now reported with the parser's own syntax error, not as "a reserved SysML keyword and cannot be used as a name".
 - A definition's or usage's members include the ones it inherits (KerML 7.3.2.1, 8.2.3.5.3, 8.3.3.1.10 `Type::inheritedMemberships`): the public and protected members of the types it specializes by typing, subclassification, subsetting or redefinition, less the features redefined there. An owned member comes first, an imported one after the inherited ones.
 - A redefined feature named after `:>>` or `redefines` is resolved from the types the redefining feature's owner specializes (KerML 8.2.3.5.1). `part part2R :>> part2;` inside `part part1S :> part1` now resolves to `part1`'s `part2` in go-to-definition, references and rename, rather than to an unrelated element of the same name elsewhere.
+- A usage declared without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`, `return : Real;`) gets a reference usage symbol, like one with `ref` (7.6.4), so parameters are no longer missing and an unknown type on one is reported as `unresolved-type`.
+- An empty declaration (`{ part w : A; }`, a lone `;`) is an anonymous reference usage, owning the members of its body.
+- A variant naming a separately declared usage (`variant part1;`) is a reference usage owned by its variation, with that usage's name and short name, whichever of them it is referenced by (7.6.7, 8.3.6.4). Go to definition and rename on its name, and on `perform a;`, resolve it in its owning namespace, including that namespace's imports, to the usage it references rather than to itself.
+- The outline and `sysml/model` name such a variant after a usage in another document, and name it again when that usage is renamed. A chain of variants each naming the one before it is named through to its end, however long. A variant named after itself through other variants is reported as `circular-naming`. One whose name does not settle within the budget of rounds of name resolution is reported as `naming-resolution-limit`.
+
+### Deprecated
+
+- `caches.symbolTables` in the `sysml/serverStats` result, and `symbolTables` in the `sysml/clearCache` result, are always 0 and will be removed in a future release: the server keeps a single workspace symbol table, built incrementally with the documents.
 
 ## [0.39.0]
 

@@ -11,9 +11,8 @@ import { Range } from 'vscode-languageserver/node';
 import { analyseComplexity } from '../analysis/complexityAnalyzer.js';
 import { DocumentManager } from '../documentManager.js';
 import { getLibraryPackageNames } from '../library/libraryIndex.js';
-import { ParseResult } from '../parser/parseDocument.js';
 import { NamespaceKey, NamespaceResolver, buildSymbolIndexes, describeConflictingDeclarations, findConflictingDeclarations, namespaceKeyOf, otherDeclarations, ownerKeyOf } from '../symbols/namespaceResolver.js';
-import { SymbolTable } from '../symbols/symbolTable.js';
+import { describeNamingIssue, SymbolTable } from '../symbols/symbolTable.js';
 import {
     SysMLElementKind,
     SysMLSymbol,
@@ -196,14 +195,10 @@ function symbolsById(symbols: SysMLSymbol[]): Map<string, SysMLSymbol> {
  * Provides the full semantic model for a document by converting the
  * server's internal ANTLR parse tree and symbol table into serializable DTOs.
  *
- * The symbol table is cached per URI + document version so repeated
- * `getModel()` calls (dashboard refresh, explorer update, etc.) skip
- * the ANTLR tree walk when the source hasn't changed.
+ * Its symbols are the workspace symbol table's, which builds a document
+ * again only when it, or a document its names depend on, changes.
  */
 export class SysMLModelProvider {
-    /** Cached symbol tables keyed by URI. */
-    private _stCache = new Map<string, { version: number; table: SymbolTable }>();
-
     /** Namespace/import-aware name resolution (§7.5), shared with SemanticValidator. */
     private readonly namespaceResolver = new NamespaceResolver();
 
@@ -211,61 +206,6 @@ export class SysMLModelProvider {
     private libraryNamesCache?: Set<string>;
 
     constructor(private readonly documentManager: DocumentManager) { }
-
-    /** Remove cached symbol table for a URI (e.g. on document close). */
-    removeUri(uri: string): void {
-        this._stCache.delete(uri);
-    }
-
-    /**
-     * Drop **all** cached symbol tables.
-     * Returns the number of entries that were evicted.
-     */
-    clearAll(): number {
-        const count = this._stCache.size;
-        this._stCache.clear();
-        return count;
-    }
-
-    /** Number of cached symbol tables (for diagnostics / stats). */
-    get cacheSize(): number {
-        return this._stCache.size;
-    }
-
-    /**
-     * Return a cached-or-fresh SymbolTable for a URI.
-     *
-     * The table is rebuilt only when the document version changes.
-     */
-    private _getSymbolTable(uri: string, parseResult: ParseResult): SymbolTable {
-        const version = this.documentManager.getVersion(uri);
-        const cached = this._stCache.get(uri);
-        if (cached && cached.version === version) {
-            return cached.table;
-        }
-        const table = new SymbolTable();
-        table.build(uri, parseResult);
-        this._stCache.set(uri, { version, table });
-        return table;
-    }
-
-    /**
-     * Give this document's symbols the symbol IDs of the workspace symbol table.
-     * A symbol ID can depend on other documents (a clash, or identical anonymous
-     * elements in a package declared in several), which this document's own
-     * table doesn't see. Both tables come from the same parse, so each
-     * declaration is matched by its kind and position.
-     */
-    private useWorkspaceIds(symbolTable: SymbolTable, uri: string): void {
-        const siteOf = (s: SysMLSymbol) => `${s.kind}@${s.range.start.line}:${s.range.start.character}`;
-        const workspace = new Map(this.documentManager.getWorkspaceSymbolTable().getSymbolsForUri(uri).map(s => [siteOf(s), s]));
-        for (const symbol of symbolTable.getSymbolsForUri(uri)) {
-            const declaration = workspace.get(siteOf(symbol));
-            if (!declaration) continue;
-            symbol.symbolId = declaration.symbolId;
-            symbol.parentId = declaration.parentId;
-        }
-    }
 
     /**
      * Build the model response for a document.
@@ -287,9 +227,9 @@ export class SysMLModelProvider {
                 : ['elements', 'relationships', 'sequenceDiagrams', 'activityDiagrams', 'resolvedTypes', 'diagnostics'],
         );
 
-        // Build (or retrieve cached) symbol table from parse result
-        const symbolTable = this._getSymbolTable(uri, parseResult);
-        this.useWorkspaceIds(symbolTable, uri);
+        // The workspace symbol table: this document's symbols there carry the names, symbol IDs and
+        // owners that depend on other documents, and are rebuilt when those change.
+        const symbolTable = this.documentManager.getWorkspaceSymbolTable();
 
         const text = this.documentManager.getText(uri) ?? '';
         const lines = text.split('\n');
@@ -1315,7 +1255,7 @@ export class SysMLModelProvider {
         // this document's own -- a type can be legitimately declared in, or
         // imported from, another file (see NamespaceResolver's own doc comment
         // for why this is shared with SemanticValidator rather than duplicated).
-        const workspaceIndexes = buildSymbolIndexes(this.documentManager.getWorkspaceSymbolTable().getAllSymbols());
+        const workspaceIndexes = buildSymbolIndexes(symbolTable.getAllSymbols());
         if (!this.libraryNamesCache) {
             this.libraryNamesCache = new Set(getLibraryPackageNames());
         }
@@ -1331,8 +1271,8 @@ export class SysMLModelProvider {
         // request's own diagnostics (Model Explorer, Dashboard, Feature
         // Inspector) explain *why* a reference is unresolved the same way the
         // editor's own diagnostics do, not just leave it unexplained.
-        // By symbol ID: this document's own symbols carry the workspace's symbol IDs (`useWorkspaceIds`).
-        const conflicts = new Map([...findConflictingDeclarations(this.documentManager.getWorkspaceSymbolTable().getAllSymbols())]
+        // By symbol ID, as this document's symbols are the workspace's.
+        const conflicts = new Map([...findConflictingDeclarations(symbolTable.getAllSymbols())]
             .map(([declaration, group]) => [declaration.symbolId, group]));
 
         for (const symbol of symbols) {
@@ -1380,6 +1320,16 @@ export class SysMLModelProvider {
                     });
                 }
             }
+        }
+
+        // Usages whose effective names did not settle, as `SemanticValidator.checkNamingIssues` reports them.
+        for (const issue of symbolTable.getNamingIssues(uri)) {
+            diagnostics.push({
+                ...describeNamingIssue(issue),
+                severity: 'warning',
+                range: this.rangeToDTO(issue.symbol.selectionRange),
+                elementName: issue.symbol.name,
+            });
         }
 
         return diagnostics;

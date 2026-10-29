@@ -1887,6 +1887,454 @@ describe('anonymous usages and definitions', () => {
     });
 });
 
+describe('reference usages without `ref`', () => {
+    it('should give a usage without a kind keyword a reference usage symbol, like `ref`', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        ref r : A;
+        x : A;
+        in y : A;
+        out z : A [2];
+        derived d : A;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const members = st.getSymbolsForUri('test://test.sysml').filter(s => st.getOwner(s)?.qualifiedName === 'Demo::P');
+        expect(members.map(s => [s.qualifiedName, s.kind, s.typeNames, s.multiplicity])).toEqual([
+            ['Demo::P::r', 'ref', ['A'], undefined],
+            ['Demo::P::x', 'ref', ['A'], undefined],
+            ['Demo::P::y', 'ref', ['A'], undefined],
+            ['Demo::P::z', 'ref', ['A'], '2'],
+            ['Demo::P::d', 'ref', ['A'], undefined],
+        ]);
+    });
+
+    it('should give an action\'s parameters symbols owned by the action', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    action def Act {
+        in item1 : A;
+        out item2 : A;
+    }
+    action act {
+        inout p : A;
+    }
+}
+`);
+
+        expect(st.getAllSymbols().filter(s => s.kind === 'ref').map(s => s.qualifiedName)).toEqual([
+            'Demo::Act::item1', 'Demo::Act::item2', 'Demo::act::p',
+        ]);
+    });
+
+    it('should name a redefinition without a name of its own after the feature it redefines', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    part def P { x : A; }
+    part q : P {
+        :>> x : A;
+    }
+}
+`);
+
+        const [x] = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::q');
+        expect([x.qualifiedName, x.kind, isAnonymous(x)]).toEqual(['Demo::q::x', 'ref', false]);
+    });
+
+    it('should give a body without a declaration an anonymous reference usage owning its members', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    {
+        part w : A;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const anonymous = st.getAllSymbols().find(s => s.kind === 'ref')!;
+        expect([isAnonymous(anonymous), displayName(anonymous), st.getOwner(anonymous)?.qualifiedName]).toEqual([true, 'ref', 'Demo']);
+        expect(st.findByName('w').map(w => w.parentId)).toEqual([anonymous.symbolId]);
+    });
+
+    it('should not read the rest of an invalid statement as a usage', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    requirement def R;
+    requirement r : R;
+    part sys {
+        verify r;
+    }
+    package Q {
+        import Demo::R;
+    }
+    verify requirement r by sys;
+}
+`);
+
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(st.getAllSymbols().filter(s => s.kind === 'ref')).toEqual([]);
+    });
+
+    it('should read every declaration form of a usage without a kind keyword', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    private import ScalarValues::*;
+    part def A;
+    part def B { attribute mass : Real; x : A; }
+    part b2 : B {
+        :>> mass = 1500;
+        redefines x;
+        <s1> short : A;
+        multi[2] : A;
+        sub :> x;
+        abstract constant c1 : A;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const members = st.getSymbolsForUri('test://test.sysml').filter(s => st.getOwner(s)?.qualifiedName === 'Demo::b2');
+        expect(members.map(s => [s.name, s.kind, s.shortName, s.typeNames, s.multiplicity])).toEqual([
+            // As for any usage kind, a `:>>` redefinition is also listed with the type names.
+            ['mass', 'ref', undefined, ['mass'], undefined],
+            ['x', 'ref', undefined, [], undefined],
+            ['short', 'ref', 's1', ['A'], undefined],
+            ['multi', 'ref', undefined, ['A'], '2'],
+            ['sub', 'ref', undefined, ['x'], undefined],
+            ['c1', 'ref', undefined, ['A'], undefined],
+        ]);
+        expect(members.slice(0, 2).map(s => s.redefinedFeatureTargets)).toEqual([['mass'], ['x']]);
+    });
+
+    it('should give a usage without a kind keyword its visibility and documentation', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        private hidden : A;
+        documented : A {
+            doc /* The documented feature. */
+        }
+    }
+}
+`);
+
+        expect(st.findByName('hidden').map(s => s.visibility)).toEqual(['private']);
+        expect(st.findByName('documented')[0].documentation).toContain('The documented feature.');
+    });
+
+    it('should make a named usage without a kind keyword own the members of its body', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        named : A { part inner : A; }
+    }
+}
+`);
+
+        const named = st.findByName('named')[0];
+        expect(st.findByName('inner').map(s => [s.qualifiedName, s.parentId])).toEqual([['Demo::P::named::inner', named.symbolId]]);
+    });
+
+    it('should give calculation and constraint parameters symbols, and a return parameter an anonymous one', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    private import ScalarValues::*;
+    calc def Double {
+        in v : Real;
+        return : Real;
+        v * 2
+    }
+    calc def Half {
+        in w : Real;
+        return h : Real;
+        w / 2
+    }
+    constraint def Limit {
+        in m : Real;
+        m < 2000
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const refs = st.getAllSymbols().filter(s => s.kind === 'ref').sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(refs.map(s => [st.getOwner(s)?.name, s.name, displayName(s), s.typeNames])).toEqual([
+            ['Double', 'v', 'v', ['Real']],
+            ['Double', '', ': Real', ['Real']],
+            ['Half', 'w', 'w', ['Real']],
+            ['Half', 'h', 'h', ['Real']],
+            ['Limit', 'm', 'm', ['Real']],
+        ]);
+    });
+
+    it('should not read enumerated values, successions, state actions or result expressions as usages', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    private import ScalarValues::*;
+    part def B { attribute mass : Real; }
+    enum def Color { red; green; }
+    state def S {
+        entry; then off;
+        state off;
+    }
+    action def Seq {
+        action a1;
+        action a2;
+        first a1 then a2;
+    }
+    requirement def R {
+        subject v : B;
+        require constraint { v.mass < 2000 }
+    }
+    metadata def Tag;
+    #Tag t1 : B;
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        expect(st.getAllSymbols().filter(s => s.kind === 'ref')).toEqual([]);
+    });
+
+    it('should give a lone `;` an anonymous reference usage symbol, an empty usage by the grammar', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        part a : A;;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const refs = st.getAllSymbols().filter(s => s.kind === 'ref');
+        expect(refs.map(s => [isAnonymous(s), displayName(s), st.getOwner(s)?.qualifiedName])).toEqual([[true, 'ref', 'Demo::P']]);
+    });
+
+    it('should give a variant naming a separately declared usage a reference usage symbol named after it', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    item item1 : ItemDef;
+    part def P { part q : ItemDef; part r : ItemDef [*]; }
+    part p : P;
+    variation item itemChoice : ItemDef {
+        variant part1;
+        variant item1;
+        variant P::q;
+        variant p.r :> part1 { attribute m; }
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const variants = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice')
+            .sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(variants.map(s => [s.qualifiedName, s.kind, isAnonymous(s), s.specializationNames])).toEqual([
+            ['Demo::itemChoice::part1', 'ref', false, []],
+            ['Demo::itemChoice::item1', 'ref', false, []],
+            ['Demo::itemChoice::q', 'ref', false, []],
+            ['Demo::itemChoice::r', 'ref', false, ['part1']],
+        ]);
+        expect(st.findByName('m').map(s => s.parentId)).toEqual([variants[3].symbolId]);
+        // The usages it names keep their own symbols.
+        expect(st.findByName('part1').map(s => [s.qualifiedName, s.kind])).toEqual([['Demo::part1', 'part'], ['Demo::itemChoice::part1', 'ref']]);
+    });
+
+    it('should name a variant after the usage it references, whichever of its names it is referenced by', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part <p1> part1 : ItemDef;
+    package Lib { part <q1> q : ItemDef; }
+    variation item itemChoice : ItemDef {
+        variant p1;
+        variant Lib::q1;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const variants = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice')
+            .sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(variants.map(s => [s.qualifiedName, s.name, s.shortName, s.namingReference])).toEqual([
+            ['Demo::itemChoice::part1', 'part1', 'p1', 'p1'],
+            ['Demo::itemChoice::q', 'q', 'q1', 'Lib::q1'],
+        ]);
+        // Its selection is still the reference as written.
+        expect([variants[0].selectionRange.start, variants[0].selectionRange.end]).toEqual([{ line: 6, character: 16 }, { line: 6, character: 18 }]);
+    });
+
+    it('should name a variant referencing a feature through a feature chain after that feature', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part def P { part <r1> r : ItemDef; }
+    part p : P;
+    variation item itemChoice : ItemDef {
+        variant p.r1;
+    }
+}
+`);
+
+        expect(result.errors).toHaveLength(0);
+        const [variant] = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice');
+        expect([variant.qualifiedName, variant.name, variant.shortName]).toEqual(['Demo::itemChoice::r', 'r', 'r1']);
+    });
+
+    it('should name a variant after a usage in another document, whichever document is built first', async () => {
+        const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+        const { SymbolTable } = await import('../../server/src/symbols/symbolTable.js');
+        const variation = { uri: 'test://variation.sysml', text: `
+package Demo {
+    private import Lib::*;
+    item def ItemDef;
+    variation item itemChoice : ItemDef {
+        variant p1;
+    }
+}
+` };
+        const lib = { uri: 'test://lib.sysml', text: 'package Lib { part <p1> part1; }' };
+        const variantOf = (st: InstanceType<typeof SymbolTable>) => st.getAllSymbols()
+            .filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice').map(s => [s.qualifiedName, s.name, s.shortName]);
+
+        for (const order of [[variation, lib], [lib, variation]]) {
+            const st = new SymbolTable();
+            for (const { uri, text } of order) st.build(uri, parseDocument(text));
+            expect(variantOf(st)).toEqual([['Demo::itemChoice::part1', 'part1', 'p1']]);
+        }
+        const st = new SymbolTable();
+        st.buildAll([variation, lib].map(({ uri, text }) => [uri, parseDocument(text)]));
+        expect(variantOf(st)).toEqual([['Demo::itemChoice::part1', 'part1', 'p1']]);
+
+        // Renamed in its own document, it renames the variant; gone, the variant keeps the name it is referenced by.
+        st.build(lib.uri, parseDocument('package Lib { part <p1> part2; }'));
+        expect(variantOf(st)).toEqual([['Demo::itemChoice::part2', 'part2', 'p1']]);
+        st.removeUri(lib.uri);
+        expect(variantOf(st)).toEqual([['Demo::itemChoice::p1', 'p1', undefined]]);
+    });
+
+    describe('variants named after variants', () => {
+        // Each variation's variant names the one before it by its short name, which it only has once that one is named.
+        const chainText = (steps: number) => `
+package Demo {
+    item def I;
+    part <a> alpha : I;
+    variation item v1 : I { variant a; }
+${Array.from({ length: steps - 1 }, (_, i) => `    variation item v${i + 2} : I { variant v${i + 1}::a; }`).join('\n')}
+}
+`;
+        const variantsOf = (st: Awaited<ReturnType<typeof buildST>>['st']) => st.getAllSymbols()
+            .filter(s => s.namingReference !== undefined)
+            .sort((a, b) => a.range.start.line - b.range.start.line)
+            .map(s => [s.qualifiedName, s.shortName]);
+
+        it('should name each variant of a ten-step chain after the usage at its end', async () => {
+            const { st, result } = await buildST(chainText(10));
+
+            expect(result.errors).toHaveLength(0);
+            expect(variantsOf(st)).toEqual(Array.from({ length: 10 }, (_, i) => [`Demo::v${i + 1}::alpha`, 'a']));
+            expect(st.getNamingIssues('test://test.sysml')).toEqual([]);
+        });
+
+        it('should report the variants left unnamed when the budget of rounds runs out', async () => {
+            const { parseDocument } = await import('../../server/src/parser/parseDocument.js');
+            const { SymbolTable } = await import('../../server/src/symbols/symbolTable.js');
+            const st = new SymbolTable(3);
+            st.build('test://test.sysml', parseDocument(chainText(10)));
+
+            expect(variantsOf(st).slice(2, 4)).toEqual([['Demo::v3::alpha', 'a'], ['Demo::v4::a', undefined]]);
+            const issues = st.getNamingIssues('test://test.sysml');
+            expect(issues.map(issue => [issue.reason, issue.symbol.qualifiedName, issue.reason === 'limit' && issue.rounds]))
+                .toEqual([['limit', 'Demo::v4::a', 3]]);
+            const { describeNamingIssue } = await import('../../server/src/symbols/symbolTable.js');
+            expect(describeNamingIssue(issues[0])).toEqual({
+                code: 'naming-resolution-limit',
+                message: "The names of 'a' did not settle within 3 rounds of name resolution; it is named 'a' for now.",
+            });
+        });
+
+        it('should report variants whose names keep changing as unstable', async () => {
+            // Each variant is named after the other once both take the names of `alpha`.
+            const { st, result } = await buildST(`
+package Demo {
+    item def I;
+    part <a> alpha : I;
+    variation item v : I { variant a; variant alpha; }
+}
+`);
+
+            expect(result.errors).toHaveLength(0);
+            const issues = st.getNamingIssues('test://test.sysml');
+            expect(issues.map(issue => [issue.reason, issue.symbol.range.start.line])).toEqual([['unstable', 4], ['unstable', 4]]);
+            const { describeNamingIssue } = await import('../../server/src/symbols/symbolTable.js');
+            expect(describeNamingIssue(issues[0])).toEqual({
+                code: 'circular-naming',
+                message: `Circular naming: the names of '${issues[0].symbol.name}' keep changing without settling.`,
+            });
+        });
+
+        it('should report variants named after one another as a cycle, and keep their names', async () => {
+            const { st, result } = await buildST(`
+package Demo {
+    item def I;
+    variation item v1 : I { variant v2::a; }
+    variation item v2 : I { variant v1::a; }
+}
+`);
+
+            expect(result.errors).toHaveLength(0);
+            expect(variantsOf(st)).toEqual([['Demo::v1::a', undefined], ['Demo::v2::a', undefined]]);
+            const issues = st.getNamingIssues('test://test.sysml');
+            expect(issues.map(issue => [issue.reason, issue.symbol.qualifiedName, issue.reason === 'cycle' && issue.cycle.map(s => s.qualifiedName)]))
+                .toEqual([
+                    ['cycle', 'Demo::v1::a', ['Demo::v1::a', 'Demo::v2::a']],
+                    ['cycle', 'Demo::v2::a', ['Demo::v2::a', 'Demo::v1::a']],
+                ]);
+        });
+    });
+
+    it('should leave a variant declared with a kind keyword as it is', async () => {
+        const { st } = await buildST(`
+package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part references part1;
+        variant item item2 : ItemDef;
+    }
+}
+`);
+
+        const variants = st.getAllSymbols().filter(s => st.getOwner(s)?.qualifiedName === 'Demo::itemChoice')
+            .sort((a, b) => a.range.start.line - b.range.start.line);
+        expect(variants.map(s => [s.kind, s.name, displayName(s)])).toEqual([['part', '', 'references part1'], ['item', 'item2', 'item2']]);
+    });
+
+    it('should give no symbol to a usage right after a token the parser skipped (known limit)', async () => {
+        const { st, result } = await buildST(`
+package Demo {
+    part def A;
+    part def P {
+        part a : A; ) x : A;
+    }
+}
+`);
+
+        expect(result.errors.length).toBeGreaterThan(0);
+        expect(st.findByName('x')).toEqual([]);
+    });
+});
+
 describe('concern definitions and usages', () => {
     it('should extract concern definitions and usages as namespaces of their own', async () => {
         const { st, result } = await buildST(`

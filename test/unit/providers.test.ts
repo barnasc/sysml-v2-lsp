@@ -916,6 +916,24 @@ describe('Document Symbol Provider', () => {
         }
     });
 
+    it('should name a variant after a usage in another document, and again when that usage is renamed', async () => {
+        const { DocumentSymbolProvider } = await import('../../server/src/providers/documentSymbolProvider.js');
+        const { TextDocument } = await import('vscode-languageserver-textdocument');
+        const variationUri = 'test://variation.sysml';
+        const libUri = 'test://lib.sysml';
+        const { dm } = await setupMulti([
+            { uri: variationUri, text: 'package Demo { private import Lib::*; item def I; variation item choice : I { variant p1; } }' },
+            { uri: libUri, text: 'package Lib { part <p1> part1; }' },
+        ]);
+        const provider = new DocumentSymbolProvider(dm);
+        const variantName = () => provider.provideDocumentSymbols({ textDocument: { uri: variationUri } })[0]
+            .children!.find(s => s.name !== 'I')!.children!.map(s => s.name);
+
+        expect(variantName()).toEqual(['part1']);
+        dm.parse(TextDocument.create(libUri, 'sysml', 2, 'package Lib { part <p1> part2; }'));
+        expect(variantName()).toEqual(['part2']);
+    });
+
     it('should return empty for unknown URI', async () => {
         const { DocumentSymbolProvider } = await import('../../server/src/providers/documentSymbolProvider.js');
         const { DocumentManager } = await import('../../server/src/documentManager.js');
@@ -1703,5 +1721,112 @@ describe('Hover on an anonymous typed usage', () => {
         expect((hover!.contents as unknown as { value: string }).value.split('\n').filter(l => l)).toEqual([
             '**PortUsage**', 'No qualified name', 'Type: `Q`',
         ]);
+    });
+});
+
+describe('parameters without a kind keyword', () => {
+    const uri = 'test://test.sysml';
+    const text = `package Demo {
+    part def A;
+    action user {
+        action p1 { out o : A; }
+        action p2 { in i : A; }
+        flow p1.o to p2.i;
+    }
+}
+`;
+
+    it('goes to a parameter from a flow end that names it', async () => {
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { dm } = await setup(text, uri);
+        const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 5, character: 16 } });
+        expect(location?.range.start).toEqual({ line: 3, character: 24 });
+    });
+});
+
+describe('usages named after the feature they reference', () => {
+    const uri = 'test://test.sysml';
+    const text = `package Demo {
+    item def ItemDef;
+    part part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant part1;
+    }
+    action a;
+    part q { perform a; }
+}
+`;
+
+    it.each([
+        ['a variant', { line: 4, character: 18 }, { line: 2, character: 9 }],
+        ['a perform action', { line: 7, character: 21 }, { line: 6, character: 11 }],
+    ])('goes from %s to the feature it references, not to itself', async (_, position, start) => {
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { dm } = await setup(text, uri);
+        const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position });
+        expect(location?.range.start).toEqual(start);
+    });
+
+    it('lists a variant as a reference to the usage it names', async () => {
+        const { NameReferences } = await import('../../server/src/symbols/nameReferences.js');
+        const { dm } = await setup(text, uri);
+        const [part1] = dm.getWorkspaceSymbolTable().findByName('part1').filter(s => s.qualifiedName === 'Demo::part1');
+        expect(new NameReferences(dm).to(part1).map(ref => [ref.range.start, ref.isDeclaration])).toEqual([
+            [{ line: 2, character: 9 }, true],
+            [{ line: 4, character: 16 }, false],
+        ]);
+    });
+
+    describe('a variant referencing a usage its variation imports', () => {
+        const imported = `package Demo {
+    item def ItemDef;
+    package Lib { part part1 : ItemDef; }
+    part part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        private import Lib::part1;
+        variant part1;
+    }
+}
+`;
+
+        it('goes to the imported usage, not to a same-named one declared further out', async () => {
+            const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+            const { dm } = await setup(imported, uri);
+            const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 6, character: 18 } });
+            expect(location?.range.start).toEqual({ line: 2, character: 23 });
+        });
+
+        it('goes to the imported usage when nothing further out has its name', async () => {
+            const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+            const { dm } = await setup(imported.replace('    part part1 : ItemDef;\n', ''), uri);
+            const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 5, character: 18 } });
+            expect(location?.range.start).toEqual({ line: 2, character: 23 });
+        });
+
+        it('renames the variant with the imported usage, never with the same-named one further out', async () => {
+            const { RenameProvider } = await import('../../server/src/providers/renameProvider.js');
+            const { dm } = await setup(imported, uri);
+            const provider = new RenameProvider(dm);
+            const edits = (onLine: number, character: number) => (provider.provideRename({ textDocument: { uri }, position: { line: onLine, character }, newName: 'z' })
+                ?.changes?.[uri] ?? []).map(edit => edit.range.start).sort((a, b) => a.line - b.line || a.character - b.character);
+            expect(edits(2, 23)).toEqual([
+                { line: 2, character: 23 }, { line: 5, character: 28 }, { line: 6, character: 16 },
+            ]);
+            expect(edits(3, 9)).toEqual([{ line: 3, character: 9 }]);
+        });
+    });
+
+    it('goes from a variant referencing a usage by its short name to that usage', async () => {
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { dm } = await setup(`package Demo {
+    item def ItemDef;
+    part <p1> part1 : ItemDef;
+    variation item itemChoice : ItemDef {
+        variant p1;
+    }
+}
+`, uri);
+        const location = new DefinitionProvider(dm).provideDefinition({ textDocument: { uri }, position: { line: 4, character: 17 } });
+        expect(location?.range.start).toEqual({ line: 2, character: 14 });
     });
 });

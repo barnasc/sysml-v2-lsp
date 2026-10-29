@@ -129,6 +129,12 @@ export interface SysMLSymbol {
     redefinedFeatureTargets?: string[];
     /** The source ranges of `redefinedFeatureTargets`, in the same order. */
     redefinedFeatureTargetRanges?: Range[];
+    /**
+     * For a usage named after the feature it references (`perform a;`,
+     * `variant part1;`, 8.3.6.4, 8.3.17.14): that reference, as written. Its
+     * name token is that reference, not a declaration of a name of its own.
+     */
+    namingReference?: string;
     /** Documentation string if available */
     documentation?: string;
     /** Visibility declared on the owning membership; omitted for default public visibility. */

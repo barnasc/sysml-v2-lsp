@@ -204,6 +204,60 @@ package Example {
         expect(await definitionLine(text, 'renamed', '\'old feature\';')).toBe('part \'old feature\' [1];');
     });
 
+    it('keeps variant naming and redefinition targets consistent across documents after a target rename', async () => {
+        const { TextDocument } = await import('vscode-languageserver-textdocument');
+        const { DocumentManager } = await import('../../server/src/documentManager.js');
+        const { DefinitionProvider } = await import('../../server/src/providers/definitionProvider.js');
+        const { DocumentSymbolProvider } = await import('../../server/src/providers/documentSymbolProvider.js');
+        const { SysMLModelProvider } = await import('../../server/src/model/sysmlModelProvider.js');
+        const libUri = 'file:///ws/lib.sysml';
+        const uri = 'file:///ws/variation.sysml';
+        const libText = `package Lib {
+    part '  wheel  ';
+    part def Base {
+        part '  wheel  ' [1];
+    }
+    part def Derived :> Base {
+        part <s> spare :>> '  wheel  ';
+    }
+    part p : Derived;
+}`;
+        const text = `package Demo {
+    private import Lib::*;
+    variation part choice {
+        variant p.s;
+    }
+}`;
+        const dm = new DocumentManager();
+        const libDoc = TextDocument.create(libUri, 'sysml', 1, libText);
+        const doc = TextDocument.create(uri, 'sysml', 1, text);
+        dm.parse(libDoc);
+        dm.parse(doc);
+        expect(dm.get(libUri)!.errors).toEqual([]);
+        expect(dm.get(uri)!.errors).toEqual([]);
+        const definition = new DefinitionProvider(dm);
+        const redefined = definition.provideDefinition({
+            textDocument: { uri: libUri },
+            position: libDoc.positionAt(libText.indexOf("'  wheel  '", libText.indexOf('spare')) + 3),
+        });
+        expect(redefined).toMatchObject({ uri: libUri, range: { start: { line: 3 } } });
+        const variantPosition = doc.positionAt(text.indexOf('p.s') + 2);
+        expect(definition.provideDefinition({ textDocument: { uri }, position: variantPosition }))
+            .toMatchObject({ uri: libUri, range: { start: { line: 6 } } });
+
+        const outline = new DocumentSymbolProvider(dm);
+        const model = new SysMLModelProvider(dm);
+        const names = () => [
+            outline.provideDocumentSymbols({ textDocument: { uri } })[0].children![0].children![0].name,
+            model.getModel(uri, 1, ['elements']).elements![0].children[0].children[0].name,
+        ];
+        expect(names()).toEqual(['spare', 'spare']);
+        dm.parse(TextDocument.create(libUri, 'sysml', 2, libText.replace('spare', 'replacement')));
+        expect(names()).toEqual(['replacement', 'replacement']);
+        expect(definition.provideDefinition({ textDocument: { uri }, position: variantPosition }))
+            .toMatchObject({ uri: libUri, range: { start: { line: 6 } } });
+    });
+
     it('resolves a quoted name with leading and trailing spaces, not the trimmed name', async () => {
         const text = `package P {
     part '  old feature   ';
