@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- Update transitive `body-parser` to 2.4.0 (CVE-2026-111181) and `ip-address` to 10.7.5 (CVE-2026-111997) to address denial-of-service advisories.
+
 ### Fixed
 
 - A usage declared without a kind keyword (`x : A;`, `in p : A;`, `:>> x = 1;`, `return : Real;`) gets a reference usage symbol, like one with `ref` (7.6.4), so parameters are no longer missing and an unknown type on one is reported as `unresolved-type`.
@@ -11,6 +15,8 @@
 - A message (`message`) gets a flow usage symbol, with its payload and `from`/`to` events (8.2.2.16 `Message : FlowUsage`).
 - The payload type of a flow, succession flow or message written without a payload name (`flow of Fuel ...`, `flow of [2] Fuel ...`) is a `type` semantic token, not a `variable`.
 - A flow payload's type is read from its typing only and as written: a payload subsetting a feature (`of p :> a.b`) has no type, and a qualified one (`of P::Fuel`) keeps its qualification.
+- A single-quoted (unrestricted) name (`'my part'`) gets the same semantic token as a basic name (type, variable, …), not a `string` token; only a double-quoted literal is a `string` (KerML 8.2.2.3, 8.2.2.5).
+- The type after `specializes`, `defined by` or `typed by` is a `type` semantic token, as after `:>` or `:`, not a `variable`.
 
 ## [0.39.0]
 
