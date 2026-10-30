@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `sysml/model` reports the value of every kind of usage, not only attributes, read from its own `ValuePart` (SysML 8.2.2.6.2): the expression after `=`, `:=` or `default`, with `isDefault` and `isInitial` for a default and an initial value (SysML 7.13.4). A cross subsetting (`=> x`) is no longer reported as a value.
+
 ## [0.40.0]
 
 ### Security

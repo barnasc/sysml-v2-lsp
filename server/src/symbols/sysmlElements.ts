@@ -139,6 +139,11 @@ export interface SysMLSymbol {
     documentation?: string;
     /** Visibility declared on the owning membership; omitted for default public visibility. */
     visibility?: 'public' | 'private' | 'protected';
+    /**
+     * The element's own feature value (SysML 7.13.4): its expression as written,
+     * and whether it is a default (`default`) and an initial (`:=`) value.
+     */
+    value?: { expression: string; isDefault: boolean; isInitial: boolean };
     /** Source reference for a transition usage. */
     source?: string;
     /** Target reference for a transition usage. */

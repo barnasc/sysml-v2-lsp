@@ -1016,6 +1016,40 @@ package InheritTest {
     });
 });
 
+describe('Feature value (SysML 7.13.4, 8.2.2.6.2 ValuePart)', () => {
+    it('records the own value of a symbol, with its kind', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part def Engine;
+    part a {
+        part standardEngine : Engine;
+        attribute bound = 12;
+        attribute count := 0;
+        part engine : Engine default := standardEngine;
+        attribute crossing => bound;
+    }
+}
+`);
+        const valueOf = (name: string) => st.getAllSymbols().find(symbol => symbol.name === name)?.value;
+        expect(valueOf('bound')).toEqual({ expression: '12', isDefault: false, isInitial: false });
+        expect(valueOf('count')).toEqual({ expression: '0', isDefault: false, isInitial: true });
+        expect(valueOf('engine')).toEqual({ expression: 'standardEngine', isDefault: true, isInitial: true });
+        expect(valueOf('crossing')).toBeUndefined();
+        expect(valueOf('a')).toBeUndefined();
+    });
+
+    it('records no value for a value part without an expression (a syntax error)', async () => {
+        const { st } = await buildST(`
+package Demo {
+    part a {
+        attribute broken = ;
+    }
+}
+`);
+        expect(st.getAllSymbols().find(symbol => symbol.name === 'broken')?.value).toBeUndefined();
+    });
+});
+
 describe('Package split across files: fields beyond imports/filters also merge', () => {
     // A reopened package (`package P { ... }` in more than one file) is one
     // semantic namespace, not several -- a `doc`, prefix `#annotation`, or

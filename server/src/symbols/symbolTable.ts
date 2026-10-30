@@ -1,7 +1,7 @@
 import { ErrorNode, ParserRuleContext, ParseTree, TerminalNode, Token } from 'antlr4ng';
 import { Range } from 'vscode-languageserver/node';
 import { SysMLv2Lexer } from '../generated/SysMLv2Lexer.js';
-import { MultiplicityBoundsContext, OwnedExpressionContext, SysMLv2Parser } from '../generated/SysMLv2Parser.js';
+import { FeatureValueContext, MultiplicityBoundsContext, OwnedExpressionContext, SysMLv2Parser } from '../generated/SysMLv2Parser.js';
 import { ParseResult } from '../parser/parseDocument.js';
 import { contextToRange, tokenToRange } from '../parser/positionUtils.js';
 import { SYSML_KEYWORDS } from '../utils/sysmlKeywords.js';
@@ -1286,6 +1286,7 @@ export class SymbolTable {
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
         const visibility = this.extractVisibility(ctx);
+        const value = this.extractValue(ctx);
         // Only extract multiplicity for usages
         const { multiplicity, multiplicityRange } = isUsageKind(kind) ? this.extractMultiplicity(ctx) : {};
         // Extract prefix metadata annotations (#name)
@@ -1327,6 +1328,7 @@ export class SymbolTable {
             namingReference,
             documentation,
             visibility,
+            value,
             source: transition?.source,
             target: transition?.target,
             flowDetails,
@@ -1937,6 +1939,21 @@ export class SymbolTable {
         }
 
         return undefined;
+    }
+
+    /**
+     * `ctx`'s own feature value (SysML 7.13.4, 8.2.2.6.2 `ValuePart`, `FeatureValue`):
+     * its expression as written, and whether it is a default (`default`) and an
+     * initial (`:=`) value. Never a nested element's value; a cross subsetting
+     * (`=> x`) is not a value.
+     */
+    private extractValue(ctx: ParserRuleContext): SysMLSymbol['value'] {
+        const featureValue = this.findOwnHeaderRule(ctx, SysMLv2Parser.RULE_valuePart)
+            ?.getRuleContext(0, FeatureValueContext);
+        const expression = featureValue?.ownedExpression();
+        const text = expression && this.declarationText(expression);
+        if (!featureValue || !text) return undefined;
+        return { expression: text, isDefault: featureValue.DEFAULT() !== null, isInitial: featureValue.COLON_EQ() !== null };
     }
 
     /**

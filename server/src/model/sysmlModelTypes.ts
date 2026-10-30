@@ -215,7 +215,9 @@ export interface SysMLElementDTO {
      *   documentation – Doc comment text
      *   doc           – Alternative doc field
      *   modifier      – Element modifiers (abstract, etc.)
-     *   value         – Default/assigned value
+     *   value         – Expression of the element's own feature value, as written
+     *   isDefault     – true for a default feature value (`default`, `default =`, `default :=`)
+     *   isInitial     – true for an initial feature value (`:=`, `default :=`)
      *   visibility    – 'public' | 'private' | 'protected'
      *   isAnonymous   – true for an element without a name (its `name` is empty)
      */
