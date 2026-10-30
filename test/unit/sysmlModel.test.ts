@@ -1759,21 +1759,136 @@ package Test {
             expect(av!.attributes['modifier']).toContain('abstract');
         });
 
-        it('should extract the constant modifier of a usage (SysML 8.2.2.6.2 RefPrefix)', async () => {
-            const model = await getModelForText(`
-package Test {
+        describe('usage prefix (SysML 8.2.2.6.2 RefPrefix, BasicUsagePrefix, MultiplicityPart)', () => {
+            const text = `
+package Demo {
+    part def Base;
+    part def P {
+        constant attribute c;
+        out derived attribute d;
+        attribute plain;
+    }
+    part p {
+        item item1 : Base [1..*] ordered nonunique;
+        ref item item9;
+        in item fin;
+        constant attribute c;
+        constant ref part r2 : Base;
+        out derived attribute d;
+        item plain;
+    }
+    connection def C {
+        end part a : Base;
+    }
+    part q {
+        abstract part inner;
+    }
+    part def R {
+        /* not abstract, not individual */
+    }
+    abstract individual part def S;
+}
+`;
+            const find = (elements: any[], path: string[]): any =>
+                path.reduce((found, name) => found?.children.find((e: { name: string }) => e.name === name),
+                    { children: elements });
+            // `modifier` without the deprecated `readonly` alias, which the legacy tests below cover.
+            const modifierOf = (element: any): string | undefined =>
+                element.attributes['modifier']?.split(', ').filter((keyword: string) => keyword !== 'readonly').join(', ');
+
+            it('reports ordered and nonunique as attributes, not as modifiers', async () => {
+                const model = await getModelForText(text, ['elements']);
+                const item1 = find(model.elements!, ['Demo', 'p', 'item1']);
+                expect(item1.attributes['ordered']).toBe(true);
+                expect(item1.attributes['nonunique']).toBe(true);
+                expect(item1.attributes['modifier']).toBeUndefined();
+            });
+
+            it('reports ref, constant and end, also combined, in written order', async () => {
+                const model = await getModelForText(text, ['elements']);
+                expect(modifierOf(find(model.elements!, ['Demo', 'p', 'item9']))).toBe('ref');
+                expect(modifierOf(find(model.elements!, ['Demo', 'p', 'c']))).toBe('constant');
+                expect(modifierOf(find(model.elements!, ['Demo', 'p', 'r2']))).toBe('constant, ref');
+                expect(modifierOf(find(model.elements!, ['Demo', 'C', 'a']))).toBe('end');
+                expect(modifierOf(find(model.elements!, ['Demo', 'S']))).toBe('abstract, individual');
+            });
+
+            it('reports the direction of any usage, apart from its modifiers', async () => {
+                const model = await getModelForText(text, ['elements']);
+                const fin = find(model.elements!, ['Demo', 'p', 'fin']);
+                expect(fin.attributes['direction']).toBe('in');
+                expect(fin.attributes['modifier']).toBeUndefined();
+                const d = find(model.elements!, ['Demo', 'p', 'd']);
+                expect(d.attributes['direction']).toBe('out');
+                expect(d.attributes['modifier']).toBe('derived');
+            });
+
+            it('reports nothing for a usage without prefix keywords', async () => {
+                const model = await getModelForText(text, ['elements']);
+                const plain = find(model.elements!, ['Demo', 'p', 'plain']);
+                expect(plain.attributes['modifier']).toBeUndefined();
+                expect(plain.attributes['direction']).toBeUndefined();
+                expect(plain.attributes['ordered']).toBeUndefined();
+            });
+
+            it('does not credit a member\'s keywords or a comment\'s words to the owner', async () => {
+                const model = await getModelForText(text, ['elements']);
+                expect(find(model.elements!, ['Demo', 'q']).attributes['modifier']).toBeUndefined();
+                expect(find(model.elements!, ['Demo', 'q', 'inner']).attributes['modifier']).toBe('abstract');
+                expect(find(model.elements!, ['Demo', 'R']).attributes['modifier']).toBeUndefined();
+                expect(find(model.elements!, ['Demo', 'p']).attributes['modifier']).toBeUndefined();
+                expect(find(model.elements!, ['Demo']).attributes['modifier']).toBeUndefined();
+            });
+
+            it('reports isConstant and isDerived of a resolved feature', async () => {
+                const model = await getModelForText(text, ['resolvedTypes']);
+                const key = Object.keys(model.resolvedTypes!).find(k => k.endsWith('::P'));
+                expect(key).toBeDefined();
+                const features = model.resolvedTypes![key!].features;
+                expect(features.find(f => f.name === 'c')?.isConstant).toBe(true);
+                expect(features.find(f => f.name === 'plain')?.isConstant).toBe(false);
+                expect(features.find(f => f.name === 'd')?.isDerived).toBe(true);
+                expect(features.find(f => f.name === 'd')?.direction).toBe('out');
+            });
+
+            /**
+             * Legacy: `readonly` is the pre-KERML_-57 name of `constant`, kept as a
+             * deprecated alias (`modifier` and the resolved features' `isReadonly`)
+             * for clients still reading it. Remove these tests with the alias.
+             */
+            describe('legacy: deprecated readonly alias of constant (KERML_-57)', () => {
+                it('follows constant with readonly in modifier', async () => {
+                    const model = await getModelForText(text, ['elements']);
+                    expect(find(model.elements!, ['Demo', 'p', 'c']).attributes['modifier']).toBe('constant, readonly');
+                    expect(find(model.elements!, ['Demo', 'p', 'r2']).attributes['modifier']).toBe('constant, readonly, ref');
+                    expect(find(model.elements!, ['Demo', 'p', 'item9']).attributes['modifier']).toBe('ref');
+                });
+
+                it('reports isReadonly equal to isConstant for a resolved feature', async () => {
+                    const model = await getModelForText(text, ['resolvedTypes']);
+                    const key = Object.keys(model.resolvedTypes!).find(k => k.endsWith('::P'));
+                    const features = model.resolvedTypes![key!].features;
+                    // Reads the deprecated `isReadonly` on purpose.
+                    expect(features.find(f => f.name === 'c')?.isReadonly).toBe(true);
+                    expect(features.find(f => f.name === 'plain')?.isReadonly).toBe(false);
+                });
+
+                it('reports a written readonly, which is not a keyword, for no element', async () => {
+                    const model = await getModelForText(`
+package Demo {
     occurrence def Owner {
-        constant occurrence c;
-        occurrence plain;
+        readonly occurrence a;
     }
 }
 `, ['elements']);
-
-            const owner = model.elements!.find(e => e.name === 'Test')!.children.find(e => e.name === 'Owner');
-            const c = owner?.children.find(e => e.name === 'c');
-            const plain = owner?.children.find(e => e.name === 'plain');
-            expect(c?.attributes['modifier']).toContain('constant');
-            expect(plain?.attributes['modifier']).toBeUndefined();
+                    const all: any[] = [];
+                    const collect = (e: any) => { all.push(e); e.children.forEach(collect); };
+                    model.elements!.forEach(collect);
+                    for (const element of all) {
+                        expect(String(element.attributes['modifier'] ?? '')).not.toContain('readonly');
+                    }
+                });
+            });
         });
 
         it('should extract visibility (public, private, protected)', async () => {

@@ -139,6 +139,11 @@ export interface SysMLSymbol {
     documentation?: string;
     /** Visibility declared on the owning membership; omitted for default public visibility. */
     visibility?: 'public' | 'private' | 'protected';
+    /**
+     * Keywords of the element's own prefix and multiplicity part, in written
+     * order (`in`, `abstract`, `constant`, `ref`, `end`, `ordered`, ...).
+     */
+    prefixKeywords?: string[];
     /** Source reference for a transition usage. */
     source?: string;
     /** Target reference for a transition usage. */

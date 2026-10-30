@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `sysml/model` reports a usage's prefix from its own declaration (SysML 8.2.2.6.2 `RefPrefix`, `BasicUsagePrefix`, `MultiplicityPart`): `modifier` now includes `ref`, `constant` and `end`, in written order; `direction` is reported for every usage, not only ports; `ordered: true` and `nonunique: true` when written. A keyword in a member's declaration or in a comment is no longer credited to the element that owns it.
+- `constant` is reported, with `readonly` right after it as a deprecated alias, as some tables and examples in the specifications still use `readonly`. `readonly` is not a keyword in the SysML v2 or KerML grammar (KERML_-57 renamed it to `constant`), so a written `readonly` is no longer reported, and completion offers `constant` instead.
+
+### Deprecated
+
+- `readonly` in `modifier`, and the resolved features' `isReadonly`: use `constant` and `isConstant` instead. Both will be removed in a future release.
+
 ## [0.40.0]
 
 ### Security

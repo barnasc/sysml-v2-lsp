@@ -250,6 +250,33 @@ const PREFIX_EXTENSION_RULE_INDICES: ReadonlySet<number> = new Set([
     SysMLv2Parser.RULE_endFeaturePrefix,            // 86
 ]);
 
+/**
+ * Keywords of an element's own prefix and multiplicity part (SysML 8.2.2.6.1
+ * `BasicDefinitionPrefix`, 8.2.2.6.2 `RefPrefix`/`BasicUsagePrefix`/`EndUsagePrefix`,
+ * `MultiplicityPart`; KerML 8.2.4.3.1 `BasicFeaturePrefix`/`EndFeaturePrefix`).
+ */
+const PREFIX_KEYWORD_TOKENS: ReadonlySet<number> = new Set([
+    SysMLv2Lexer.IN, SysMLv2Lexer.OUT, SysMLv2Lexer.INOUT,
+    SysMLv2Lexer.ABSTRACT, SysMLv2Lexer.VARIATION, SysMLv2Lexer.INDIVIDUAL,
+    SysMLv2Lexer.DERIVED, SysMLv2Lexer.CONSTANT, SysMLv2Lexer.CONST, SysMLv2Lexer.VAR,
+    SysMLv2Lexer.COMPOSITE, SysMLv2Lexer.PORTION, SysMLv2Lexer.SNAPSHOT, SysMLv2Lexer.TIMESLICE,
+    SysMLv2Lexer.REF, SysMLv2Lexer.END,
+    SysMLv2Lexer.ORDERED, SysMLv2Lexer.NONUNIQUE,
+]);
+
+/**
+ * Parts of a declaration that hold another element's keywords: an end's cross
+ * feature (`end [1] cross ...`), and prefix metadata (`#m`).
+ */
+const FOREIGN_PREFIX_RULE_INDICES: ReadonlySet<number> = new Set([
+    SysMLv2Parser.RULE_ownedCrossFeatureMember,
+    SysMLv2Parser.RULE_ownedCrossMultiplicityMember,
+    SysMLv2Parser.RULE_prefixMetadataMember,
+    SysMLv2Parser.RULE_prefixMetadataAnnotation,
+    SysMLv2Parser.RULE_definitionExtensionKeyword,
+    SysMLv2Parser.RULE_usageExtensionKeyword,
+]);
+
 /** Rules that represent :> subsetting / specializes / subclassification */
 const TYPE_SPECIALIZATION_RULE_INDICES: ReadonlySet<number> = new Set([
     SysMLv2Parser.RULE_specialization,          // 66
@@ -1286,6 +1313,7 @@ export class SymbolTable {
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
         const visibility = this.extractVisibility(ctx);
+        const prefixKeywords = this.extractPrefixKeywords(ctx);
         // Only extract multiplicity for usages
         const { multiplicity, multiplicityRange } = isUsageKind(kind) ? this.extractMultiplicity(ctx) : {};
         // Extract prefix metadata annotations (#name)
@@ -1327,6 +1355,7 @@ export class SymbolTable {
             namingReference,
             documentation,
             visibility,
+            prefixKeywords: prefixKeywords.length > 0 ? prefixKeywords : undefined,
             source: transition?.source,
             target: transition?.target,
             flowDetails,
@@ -1937,6 +1966,43 @@ export class SymbolTable {
         }
 
         return undefined;
+    }
+
+    /**
+     * The keywords of `ctx`'s own prefix and multiplicity part, in written
+     * order (`in`, `abstract`, `constant`, `ref`, `end`, `ordered`, ...):
+     * never a keyword of a nested element, its body or value, or a comment.
+     */
+    private extractPrefixKeywords(ctx: ParserRuleContext): string[] {
+        const keywords: string[] = [];
+        const visit = (node: ParserRuleContext): void => {
+            for (let i = 0; i < node.getChildCount(); i++) {
+                const child = node.getChild(i);
+                if (child instanceof TerminalNode) {
+                    if (PREFIX_KEYWORD_TOKENS.has(child.symbol.type)) keywords.push(child.getText());
+                    continue;
+                }
+                if (!(child instanceof ParserRuleContext)) continue;
+                if (RULE_INDEX_TO_KIND.has(child.ruleIndex) || BODY_RULE_INDICES.has(child.ruleIndex)
+                    || child.ruleIndex === SysMLv2Parser.RULE_valuePart || FLOW_PART_RULE_INDICES.has(child.ruleIndex)
+                    || FOREIGN_PREFIX_RULE_INDICES.has(child.ruleIndex)) continue;
+                visit(child);
+            }
+        };
+        visit(ctx);
+        return this.isEndOccurrence(ctx) ? ['end', ...keywords] : keywords;
+    }
+
+    /**
+     * Whether `ctx` is the usage of an end written `end part a` (an
+     * `endOccurrenceUsageElement`), whose `end` precedes the usage's own rule.
+     */
+    private isEndOccurrence(ctx: ParserRuleContext): boolean {
+        for (let current = ctx.parent; current instanceof ParserRuleContext; current = current.parent) {
+            if (current.ruleIndex === SysMLv2Parser.RULE_endOccurrenceUsageElement) return true;
+            if (RULE_INDEX_TO_KIND.has(current.ruleIndex) || BODY_RULE_INDICES.has(current.ruleIndex)) return false;
+        }
+        return false;
     }
 
     /**
