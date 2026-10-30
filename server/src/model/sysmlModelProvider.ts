@@ -1393,13 +1393,14 @@ export class SysMLModelProvider {
         return undefined;
     }
 
-    /** Extract modifiers (abstract, readonly, derived, etc.) from source text. */
+    /** Extract modifiers (abstract, readonly, derived, constant, etc.) from source text. */
     private extractModifier(symbol: SysMLSymbol, lines: string[]): string | undefined {
         const elementText = this.getElementText(symbol, lines);
         const modifiers: string[] = [];
         if (containsWord(elementText, 'abstract')) modifiers.push('abstract');
         if (containsWord(elementText, 'readonly')) modifiers.push('readonly');
         if (containsWord(elementText, 'derived')) modifiers.push('derived');
+        if (containsWord(elementText, 'constant')) modifiers.push('constant');
         if (containsWord(elementText, 'variation')) modifiers.push('variation');
         if (containsWord(elementText, 'individual')) modifiers.push('individual');
         return modifiers.length > 0 ? modifiers.join(', ') : undefined;

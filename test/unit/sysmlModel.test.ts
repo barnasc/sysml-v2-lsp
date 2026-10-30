@@ -1759,6 +1759,23 @@ package Test {
             expect(av!.attributes['modifier']).toContain('abstract');
         });
 
+        it('should extract the constant modifier of a usage (SysML 8.2.2.6.2 RefPrefix)', async () => {
+            const model = await getModelForText(`
+package Test {
+    occurrence def Owner {
+        constant occurrence c;
+        occurrence plain;
+    }
+}
+`, ['elements']);
+
+            const owner = model.elements!.find(e => e.name === 'Test')!.children.find(e => e.name === 'Owner');
+            const c = owner?.children.find(e => e.name === 'c');
+            const plain = owner?.children.find(e => e.name === 'plain');
+            expect(c?.attributes['modifier']).toContain('constant');
+            expect(plain?.attributes['modifier']).toBeUndefined();
+        });
+
         it('should extract visibility (public, private, protected)', async () => {
             const model = await getModelForText(`
 package Test {
