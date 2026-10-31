@@ -143,7 +143,7 @@ export interface SysMLSymbol {
      * The element's own feature value (SysML 7.13.4): its expression as written,
      * and whether it is a default (`default`) and an initial (`:=`) value.
      */
-    value?: { expression: string; isDefault: boolean; isInitial: boolean };
+    featureValue?: { expression: string; isDefault: boolean; isInitial: boolean };
     /**
      * Keywords of the element's own prefix and multiplicity part, in written
      * order (`in`, `abstract`, `constant`, `ref`, `end`, `ordered`, ...).

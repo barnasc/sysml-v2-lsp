@@ -1359,7 +1359,7 @@ export class SymbolTable {
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
         const visibility = this.extractVisibility(ctx);
-        const value = this.extractValue(ctx);
+        const featureValue = this.extractFeatureValue(ctx);
         const prefixKeywords = this.extractPrefixKeywords(ctx);
         // Only extract multiplicity for usages
         const { multiplicity, multiplicityRange } = isUsageKind(kind) ? this.extractMultiplicity(ctx) : {};
@@ -1402,7 +1402,7 @@ export class SymbolTable {
             namingReference,
             documentation,
             visibility,
-            value,
+            featureValue,
             prefixKeywords: prefixKeywords.length > 0 ? prefixKeywords : undefined,
             source: transition?.source,
             target: transition?.target,
@@ -2041,12 +2041,16 @@ export class SymbolTable {
      * (`=> x`) is not a value. The expression is the whole `OwnedExpression`,
      * expression bodies included, with whitespace and comments as one space.
      */
-    private extractValue(ctx: ParserRuleContext): SysMLSymbol['value'] {
-        const featureValue = this.findOwnValuePart(ctx)?.getRuleContext(0, FeatureValueContext);
-        const expression = featureValue?.ownedExpression();
+    private extractFeatureValue(ctx: ParserRuleContext): SysMLSymbol['featureValue'] {
+        const featureValueCtx = this.findOwnValuePart(ctx)?.getRuleContext(0, FeatureValueContext);
+        const expression = featureValueCtx?.ownedExpression();
         const text = expression && this.tokensText(this.subtreeTokens(expression));
-        if (!featureValue || !text) return undefined;
-        return { expression: text, isDefault: featureValue.DEFAULT() !== null, isInitial: featureValue.COLON_EQ() !== null };
+        if (!featureValueCtx || !text) return undefined;
+        return {
+            expression: text,
+            isDefault: featureValueCtx.DEFAULT() !== null,
+            isInitial: featureValueCtx.COLON_EQ() !== null,
+        };
     }
 
     /**

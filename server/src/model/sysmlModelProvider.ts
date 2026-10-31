@@ -427,10 +427,10 @@ export class SysMLModelProvider {
         }
 
         // The value is parsed from the element's own ValuePart.
-        if (symbol.value) {
-            attributes['value'] = symbol.value.expression;
-            if (symbol.value.isDefault) attributes['isDefault'] = true;
-            if (symbol.value.isInitial) attributes['isInitial'] = true;
+        if (symbol.featureValue) {
+            attributes['value'] = symbol.featureValue.expression;
+            if (symbol.featureValue.isDefault) attributes['isDefault'] = true;
+            if (symbol.featureValue.isInitial) attributes['isInitial'] = true;
         }
 
         // Inline relationships for this element

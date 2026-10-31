@@ -1030,7 +1030,7 @@ package Demo {
     }
 }
 `);
-        const valueOf = (name: string) => st.getAllSymbols().find(symbol => symbol.name === name)?.value;
+        const valueOf = (name: string) => st.getAllSymbols().find(symbol => symbol.name === name)?.featureValue;
         expect(valueOf('bound')).toEqual({ expression: '12', isDefault: false, isInitial: false });
         expect(valueOf('count')).toEqual({ expression: '0', isDefault: false, isInitial: true });
         expect(valueOf('engine')).toEqual({ expression: 'standardEngine', isDefault: true, isInitial: true });
@@ -1046,7 +1046,7 @@ package Demo {
     }
 }
 `);
-        expect(st.getAllSymbols().find(symbol => symbol.name === 'broken')?.value).toBeUndefined();
+        expect(st.getAllSymbols().find(symbol => symbol.name === 'broken')?.featureValue).toBeUndefined();
     });
 
     it('records an expression with expression bodies in full (SysML 7.13.4, KerML 8.2.5.8.3 BodyExpression)', async () => {
@@ -1071,7 +1071,7 @@ package Demo {
 }
 `);
         expect(result.errors).toEqual([]);
-        const valueOf = (name: string) => st.getAllSymbols().find(symbol => symbol.name === name)?.value?.expression;
+        const valueOf = (name: string) => st.getAllSymbols().find(symbol => symbol.name === name)?.featureValue?.expression;
         expect(valueOf('b1')).toBe('s->select { in i; i > 1 }');
         expect(valueOf('v1')).toBe('s->select { in i { } i > 1 }');
         expect(valueOf('n3')).toBe('s->select { in i; i > 1 }->size()');
@@ -1106,7 +1106,7 @@ package Demo {
         expect(result.errors).toEqual([]);
         const owner = st.getAllSymbols().find(symbol => symbol.qualifiedName === 'Demo::a');
         const symbolOf = (name: string) => st.getAllSymbols().find(symbol => symbol.parentId === owner?.symbolId && symbol.name === name);
-        const valueOf = (name: string) => symbolOf(name)?.value;
+        const valueOf = (name: string) => symbolOf(name)?.featureValue;
         for (const name of ['default', '=', ':=', 'x=y', 'z default', 'k1', 'c1', 'c2', 'c3']) expect(symbolOf(name), name).toBeDefined();
         expect(valueOf('default')).toEqual({ expression: '1', isDefault: false, isInitial: false });
         expect(valueOf('=')).toEqual({ expression: '2', isDefault: false, isInitial: false });
@@ -1148,7 +1148,7 @@ package Demo {
         expect(result.errors).toEqual([]);
         const transitions = st.getAllSymbols().filter(symbol => /^t\d+$/.test(symbol.name));
         expect(transitions.map(symbol => symbol.name)).toHaveLength(13);
-        for (const transition of transitions) expect({ [transition.name]: transition.value }).toEqual({ [transition.name]: undefined });
+        for (const transition of transitions) expect({ [transition.name]: transition.featureValue }).toEqual({ [transition.name]: undefined });
     });
 });
 
