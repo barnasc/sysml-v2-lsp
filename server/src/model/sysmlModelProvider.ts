@@ -1922,14 +1922,11 @@ export class SysMLModelProvider {
 
 const DIRECTIONS: ReadonlySet<string> = new Set(['in', 'out', 'inout']);
 const MULTIPLICITY_KEYWORDS: ReadonlySet<string> = new Set(['ordered', 'nonunique']);
-const CONSTANT_KEYWORDS: ReadonlySet<string> = new Set(['constant', 'const']);
 
 /**
  * An element's prefix as `sysml/model` attributes (SysML 8.2.2.6.2 `RefPrefix`,
- * `BasicUsagePrefix`, `MultiplicityPart`): its direction, its other prefix
- * keywords as written (`modifier`), and `ordered`/`nonunique`. `constant`/`const`
- * is followed by `readonly`, the pre-KERML_-57 term, which is deprecated and
- * will be removed in a future release.
+ * `BasicUsagePrefix`, 8.2.2.6.6 `MultiplicityPart`): its direction, its other
+ * prefix keywords as written (`modifier`), and `ordered`/`nonunique`.
  */
 function prefixAttributesOf(symbol: SysMLSymbol): {
     keywords: string[];
@@ -1941,14 +1938,12 @@ function prefixAttributesOf(symbol: SysMLSymbol): {
 } {
     const keywords = symbol.prefixKeywords ?? [];
     const direction = keywords.find(keyword => DIRECTIONS.has(keyword)) as 'in' | 'out' | 'inout' | undefined;
-    const modifiers = keywords
-        .filter(keyword => !DIRECTIONS.has(keyword) && !MULTIPLICITY_KEYWORDS.has(keyword))
-        .flatMap(keyword => CONSTANT_KEYWORDS.has(keyword) ? [keyword, 'readonly'] : [keyword]);
+    const modifiers = keywords.filter(keyword => !DIRECTIONS.has(keyword) && !MULTIPLICITY_KEYWORDS.has(keyword));
     return {
         keywords,
         direction,
         modifier: modifiers.length > 0 ? modifiers.join(', ') : undefined,
-        isConstant: keywords.some(keyword => CONSTANT_KEYWORDS.has(keyword)),
+        isConstant: keywords.includes('constant'),
         ordered: keywords.includes('ordered'),
         nonunique: keywords.includes('nonunique'),
     };

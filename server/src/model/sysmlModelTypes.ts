@@ -217,8 +217,7 @@ export interface SysMLElementDTO {
      *   documentation – Doc comment text
      *   doc           – Alternative doc field
      *   modifier      – Prefix keywords other than the direction, as written
-     *                   (e.g., "abstract", "derived", "ref", "end"); `constant`/`const` is
-     *                   followed by `readonly`, deprecated and to be removed in a future release
+     *                   (e.g., "abstract", "derived", "constant", "ref", "end")
      *   value         – Default/assigned value
      *   visibility    – 'public' | 'private' | 'protected'
      *   isAnonymous   – true for an element without a name (its `name` is empty)

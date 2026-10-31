@@ -1792,9 +1792,21 @@ package Demo {
             const find = (elements: any[], path: string[]): any =>
                 path.reduce((found, name) => found?.children.find((e: { name: string }) => e.name === name),
                     { children: elements });
-            // `modifier` without the deprecated `readonly` alias, which the legacy tests below cover.
-            const modifierOf = (element: any): string | undefined =>
-                element.attributes['modifier']?.split(', ').filter((keyword: string) => keyword !== 'readonly').join(', ');
+            const modifierOf = (element: any): string | undefined => element.attributes['modifier'];
+            /** Every element of `model`, depth first. */
+            const allElements = (model: { elements?: any[] }): any[] => {
+                const all: any[] = [];
+                const collect = (e: any) => { all.push(e); e.children.forEach(collect); };
+                model.elements!.forEach(collect);
+                return all;
+            };
+            const NO_PREFIX = { modifier: undefined, direction: undefined, ordered: undefined, nonunique: undefined };
+            const prefixOf = (element: any) => ({
+                modifier: element.attributes['modifier'],
+                direction: element.attributes['direction'],
+                ordered: element.attributes['ordered'],
+                nonunique: element.attributes['nonunique'],
+            });
 
             it('reports ordered and nonunique as attributes, not as modifiers', async () => {
                 const model = await getModelForText(text, ['elements']);
@@ -1852,42 +1864,238 @@ package Demo {
             });
 
             /**
-             * Legacy: `readonly` is the pre-KERML_-57 name of `constant`, kept as a
-             * deprecated alias (`modifier` and the resolved features' `isReadonly`)
-             * for clients still reading it. Remove these tests with the alias.
+             * Legacy: `isReadonly` is the pre-KERML_-57 name of a resolved feature's
+             * `isConstant`, kept as a deprecated alias. Remove this test with it.
              */
-            describe('legacy: deprecated readonly alias of constant (KERML_-57)', () => {
-                it('follows constant with readonly in modifier', async () => {
-                    const model = await getModelForText(text, ['elements']);
-                    expect(find(model.elements!, ['Demo', 'p', 'c']).attributes['modifier']).toBe('constant, readonly');
-                    expect(find(model.elements!, ['Demo', 'p', 'r2']).attributes['modifier']).toBe('constant, readonly, ref');
-                    expect(find(model.elements!, ['Demo', 'p', 'item9']).attributes['modifier']).toBe('ref');
-                });
+            it('legacy: reports the deprecated isReadonly equal to isConstant (KERML_-57)', async () => {
+                const model = await getModelForText(text, ['resolvedTypes']);
+                const key = Object.keys(model.resolvedTypes!).find(k => k.endsWith('::P'));
+                const features = model.resolvedTypes![key!].features;
+                expect(features.find(f => f.name === 'c')?.isReadonly).toBe(true);
+                expect(features.find(f => f.name === 'plain')?.isReadonly).toBe(false);
+            });
 
-                it('reports isReadonly equal to isConstant for a resolved feature', async () => {
-                    const model = await getModelForText(text, ['resolvedTypes']);
-                    const key = Object.keys(model.resolvedTypes!).find(k => k.endsWith('::P'));
-                    const features = model.resolvedTypes![key!].features;
-                    // Reads the deprecated `isReadonly` on purpose.
-                    expect(features.find(f => f.name === 'c')?.isReadonly).toBe(true);
-                    expect(features.find(f => f.name === 'plain')?.isReadonly).toBe(false);
-                });
-
-                it('reports a written readonly, which is not a keyword, for no element', async () => {
-                    const model = await getModelForText(`
+            it('reports constant without readonly, which is not a keyword', async () => {
+                const model = await getModelForText(`
 package Demo {
     occurrence def Owner {
         readonly occurrence a;
+        constant occurrence b;
     }
 }
 `, ['elements']);
-                    const all: any[] = [];
-                    const collect = (e: any) => { all.push(e); e.children.forEach(collect); };
-                    model.elements!.forEach(collect);
-                    for (const element of all) {
-                        expect(String(element.attributes['modifier'] ?? '')).not.toContain('readonly');
-                    }
-                });
+                for (const element of allElements(model)) {
+                    expect(String(element.attributes['modifier'] ?? '')).not.toContain('readonly');
+                }
+                expect(modifierOf(find(model.elements!, ['Demo', 'Owner', 'b']))).toBe('constant');
+            });
+
+            it('reports a reference usage\'s ref, and end before it', async () => {
+                const model = await getModelForText(`
+package Demo {
+    part def Base;
+    connection def C {
+        end ref e1 : Base;
+        end attribute e2;
+    }
+    part p {
+        ref r : Base;
+        in r2 : Base;
+    }
+}
+`, ['elements']);
+                expect(modifierOf(find(model.elements!, ['Demo', 'C', 'e1']))).toBe('end, ref');
+                expect(modifierOf(find(model.elements!, ['Demo', 'C', 'e2']))).toBe('end');
+                expect(modifierOf(find(model.elements!, ['Demo', 'p', 'r']))).toBe('ref');
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'r2']))).toEqual({ ...NO_PREFIX, direction: 'in' });
+            });
+
+            it('reads no keyword from a name or a reference spelled like one (unreserved keywords)', async () => {
+                const model = await getModelForText(`
+package Demo {
+    part def Base;
+    part def A;
+    part p {
+        attribute var;
+        ref x :> var;
+        ref var : Base;
+        part p2 :> var;
+        part p3 : A :>> var;
+        attribute feature;
+        attribute member : Base [*] ordered;
+    }
+}
+`, ['elements']);
+                const p = find(model.elements!, ['Demo', 'p']);
+                const named = (name: string) => p.children.filter((e: { name: string }) => e.name === name);
+                expect(prefixOf(named('var')[0])).toEqual(NO_PREFIX);
+                expect(prefixOf(named('var')[1])).toEqual({ ...NO_PREFIX, modifier: 'ref' });
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'x']))).toEqual({ ...NO_PREFIX, modifier: 'ref' });
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'p2']))).toEqual(NO_PREFIX);
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'p3']))).toEqual(NO_PREFIX);
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'feature']))).toEqual(NO_PREFIX);
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'member']))).toEqual({ ...NO_PREFIX, ordered: true });
+            });
+
+            it('does not report a portion kind (SysML 8.2.2.9.2 PortionKind is not a prefix keyword here)', async () => {
+                const model = await getModelForText(`
+package Demo {
+    part p {
+        individual snapshot part s1;
+        timeslice part s2;
+    }
+}
+`, ['elements']);
+                expect(modifierOf(find(model.elements!, ['Demo', 'p', 's1']))).toBe('individual');
+                expect(modifierOf(find(model.elements!, ['Demo', 'p', 's2']))).toBeUndefined();
+            });
+
+            it('reports a conjugated port\'s own direction (SysML 8.2.2.12)', async () => {
+                const model = await getModelForText(`
+package Demo {
+    port def P;
+    part p {
+        out port pc : ~P;
+    }
+}
+`, ['elements']);
+                expect(find(model.elements!, ['Demo', 'p', 'pc']).attributes['direction']).toBe('out');
+            });
+
+            /**
+             * A transition's trigger payload, guard and effect are owned elements
+             * (SysML 8.2.2.18.3), whose prefix and multiplicity part are theirs, not the
+             * transition's.
+             */
+            it('does not credit a transition with its trigger, guard or effect', async () => {
+                const model = await getModelForText(`
+package Demo {
+    attribute def T;
+    attribute def Real;
+    state def S {
+        state a;
+        state b;
+        attribute xs;
+        transition t first a accept p : T [1..*] ordered nonunique then b;
+        transition t2 first a accept p2 : T [*] ordered then b;
+        transition t3 first a accept p3 : T then b { attribute q [*] nonunique; }
+        transition n4 first a accept p4 : T [1..*] ordered via pp then b;
+        transition g1 first a if { in feature f : Real; true } then b;
+        transition g2 first a if xs->forAll { in feature f2 : Real [*] ordered nonunique; true } then b;
+        transition g4 first a if { in expr e4 : Real; true } then b;
+        transition g5 first a accept p5 : T if { inout feature f5; true } then b;
+        transition w1 first a accept when { in feature f : Real; true } then b;
+        transition w2 first a accept at { out feature g; 1 } then b;
+        transition w3 first a do send T({ in feature h; 1 }) then b;
+    }
+}
+`, ['elements']);
+                for (const name of ['t', 't2', 't3', 'n4', 'g1', 'g2', 'g4', 'g5', 'w1', 'w2', 'w3']) {
+                    expect(prefixOf(find(model.elements!, ['Demo', 'S', name])), name).toEqual(NO_PREFIX);
+                }
+                expect(prefixOf(find(model.elements!, ['Demo', 'S', 't3', 'q']))).toEqual({ ...NO_PREFIX, nonunique: true });
+            });
+
+            /**
+             * A transition's own `usageDeclaration`, before `first`, has a multiplicity
+             * part of its own (SysML 8.2.2.18.3 TransitionUsage).
+             */
+            it('reports a transition\'s own multiplicity part, but not its payload\'s', async () => {
+                const model = await getModelForText(`
+package Demo {
+    attribute def Sig;
+    attribute def Real;
+    state def S {
+        state a;
+        state b;
+        attribute xs;
+        transition t1 [1] ordered first a then b;
+        transition t2 :> t1 [0..*] nonunique first a accept p : Sig [1..*] ordered then b;
+        transition t3 [1] ordered first a if xs->forAll { in feature x : Real [*] nonunique; true } then b;
+    }
+}
+`, ['elements']);
+                expect(prefixOf(find(model.elements!, ['Demo', 'S', 't1']))).toEqual({ ...NO_PREFIX, ordered: true });
+                expect(prefixOf(find(model.elements!, ['Demo', 'S', 't2']))).toEqual({ ...NO_PREFIX, nonunique: true });
+                expect(prefixOf(find(model.elements!, ['Demo', 'S', 't3']))).toEqual({ ...NO_PREFIX, ordered: true });
+            });
+
+            /**
+             * In `endOccurrenceUsageElement`, the multiplicity and `nonunique` after `end`
+             * belong to the owned cross feature (SysML 8.2.2.6.2 EndUsagePrefix,
+             * OwnedCrossFeatureMember), so the end usage gets only `end`.
+             */
+            it('does not credit an end usage with its owned cross feature\'s multiplicity part', async () => {
+                const model = await getModelForText(`
+package Demo {
+    part def Base;
+    connection def C {
+        end [1] nonunique part d1 : Base;
+        end cx [0..1] nonunique part d2 : Base;
+        end port d3 : Base [1] ordered;
+    }
+}
+`, ['elements']);
+                expect(prefixOf(find(model.elements!, ['Demo', 'C', 'd1']))).toEqual({ ...NO_PREFIX, modifier: 'end' });
+                expect(prefixOf(find(model.elements!, ['Demo', 'C', 'd2']))).toEqual({ ...NO_PREFIX, modifier: 'end' });
+                expect(prefixOf(find(model.elements!, ['Demo', 'C', 'd3']))).toEqual({ ...NO_PREFIX, modifier: 'end', ordered: true });
+                for (const element of allElements(model)) {
+                    expect(element.attributes['nonunique'], element.name).toBeUndefined();
+                }
+            });
+
+            it('reports a control node\'s prefix (SysML 8.2.2.17.3 ControlNodePrefix)', async () => {
+                const model = await getModelForText(`
+package Demo {
+    action def A {
+        in derived individual merge m;
+        variation fork f [1] ordered;
+    }
+}
+`, ['elements']);
+                expect(prefixOf(find(model.elements!, ['Demo', 'A', 'm']))).toEqual({ ...NO_PREFIX, direction: 'in', modifier: 'derived, individual' });
+                expect(prefixOf(find(model.elements!, ['Demo', 'A', 'f']))).toEqual({ ...NO_PREFIX, modifier: 'variation', ordered: true });
+            });
+
+            it('credits no keyword that error recovery leaves after the declaration', async () => {
+                const model = await getModelForText(`
+package Demo {
+    part def T;
+    part p {
+        part x1 : T [1] in;
+        part x2 : T [1] ordered constant;
+        ref part x3 : T end;
+    }
+}
+`, ['elements']);
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'x1']))).toEqual(NO_PREFIX);
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'x2']))).toEqual({ ...NO_PREFIX, ordered: true });
+                expect(prefixOf(find(model.elements!, ['Demo', 'p', 'x3']))).toEqual({ ...NO_PREFIX, modifier: 'ref' });
+            });
+
+            it('does not credit an element with an inline-owned feature\'s prefix or multiplicity part', async () => {
+                const model = await getModelForText(`
+package Demo {
+    attribute def T;
+    attribute def Real;
+    part f0 {
+        part pa { out port o; }
+        part pb { in port i; }
+        attribute a5 = { in derived x5 : Real [*] ordered nonunique; x5 };
+        flow of fp : T [*] ordered nonunique from pa.o to pb.i;
+        connection cn connect [1] pa to [*] pb;
+    }
+    action def L {
+        attribute xs;
+        for i in xs { action body; }
+    }
+}
+`, ['elements']);
+                expect(prefixOf(find(model.elements!, ['Demo', 'f0', 'a5']))).toEqual(NO_PREFIX);
+                expect(prefixOf(find(model.elements!, ['Demo', 'f0', 'cn']))).toEqual(NO_PREFIX);
+                const flow = find(model.elements!, ['Demo', 'f0']).children.find((e: { type: string }) => e.type === 'flow');
+                expect(prefixOf(flow)).toEqual(NO_PREFIX);
+                expect(prefixOf(find(model.elements!, ['Demo', 'L']))).toEqual(NO_PREFIX);
             });
         });
 
