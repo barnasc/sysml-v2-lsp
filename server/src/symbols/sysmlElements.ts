@@ -144,6 +144,11 @@ export interface SysMLSymbol {
      * and whether it is a default (`default`) and an initial (`:=`) value.
      */
     value?: { expression: string; isDefault: boolean; isInitial: boolean };
+    /**
+     * Keywords of the element's own prefix and multiplicity part, in written
+     * order (`in`, `abstract`, `constant`, `ref`, `end`, `ordered`, ...).
+     */
+    prefixKeywords?: string[];
     /** Source reference for a transition usage. */
     source?: string;
     /** Target reference for a transition usage. */
