@@ -250,6 +250,61 @@ const PREFIX_EXTENSION_RULE_INDICES: ReadonlySet<number> = new Set([
     SysMLv2Parser.RULE_endFeaturePrefix,            // 86
 ]);
 
+/**
+ * Keywords of an element's own prefix and multiplicity part (SysML 8.2.2.6.1
+ * `BasicDefinitionPrefix`, 8.2.2.6.2 `RefPrefix`/`BasicUsagePrefix`/`EndUsagePrefix`,
+ * 8.2.2.6.3 `ReferenceUsage`, 8.2.2.6.6 `MultiplicityPart`, 8.2.2.9 `isIndividual`).
+ */
+const PREFIX_KEYWORD_TOKENS: ReadonlySet<number> = new Set([
+    SysMLv2Lexer.IN, SysMLv2Lexer.OUT, SysMLv2Lexer.INOUT,
+    SysMLv2Lexer.ABSTRACT, SysMLv2Lexer.VARIATION, SysMLv2Lexer.INDIVIDUAL,
+    SysMLv2Lexer.DERIVED, SysMLv2Lexer.CONSTANT,
+    SysMLv2Lexer.REF, SysMLv2Lexer.END,
+    SysMLv2Lexer.ORDERED, SysMLv2Lexer.NONUNIQUE,
+]);
+
+/**
+ * The rules entered from an element's own rule to read its prefix keywords:
+ * its prefix, declaration and multiplicity productions. Names, references,
+ * values, bodies and owned members are never among them, and none of these
+ * rules has a `PREFIX_KEYWORD_TOKENS` token in a role other than a prefix keyword.
+ */
+const PREFIX_PATH_RULE_INDICES: ReadonlySet<number> = new Set([
+    SysMLv2Parser.RULE_usagePrefix,
+    SysMLv2Parser.RULE_unextendedUsagePrefix,
+    SysMLv2Parser.RULE_basicUsagePrefix,
+    SysMLv2Parser.RULE_endUsagePrefix,
+    SysMLv2Parser.RULE_refPrefix,
+    SysMLv2Parser.RULE_featureDirection,
+    SysMLv2Parser.RULE_occurrenceUsagePrefix,
+    SysMLv2Parser.RULE_controlNodePrefix,
+    SysMLv2Parser.RULE_definitionPrefix,
+    SysMLv2Parser.RULE_basicDefinitionPrefix,
+    SysMLv2Parser.RULE_occurrenceDefinitionPrefix,
+    SysMLv2Parser.RULE_usage,
+    SysMLv2Parser.RULE_usageDeclaration,
+    SysMLv2Parser.RULE_featureDeclaration,
+    SysMLv2Parser.RULE_featureSpecializationPart,
+    SysMLv2Parser.RULE_multiplicityPart,
+    SysMLv2Parser.RULE_actionUsageDeclaration,
+    SysMLv2Parser.RULE_performActionUsageDeclaration,
+    SysMLv2Parser.RULE_constraintUsageDeclaration,
+    SysMLv2Parser.RULE_interfaceUsageDeclaration,
+    SysMLv2Parser.RULE_allocationUsageDeclaration,
+    SysMLv2Parser.RULE_flowDeclaration,
+    SysMLv2Parser.RULE_messageDeclaration,
+]);
+
+/**
+ * The rules between an `endOccurrenceUsageElement`, whose `end` is its
+ * occurrence usage's own `EndUsagePrefix` (8.2.2.6.2), and that usage's rule.
+ */
+const OCCURRENCE_USAGE_ELEMENT_RULE_INDICES: ReadonlySet<number> = new Set([
+    SysMLv2Parser.RULE_occurrenceUsageElement,
+    SysMLv2Parser.RULE_structureUsageElement,
+    SysMLv2Parser.RULE_behaviorUsageElement,
+]);
+
 /** Rules that represent :> subsetting / specializes / subclassification */
 const TYPE_SPECIALIZATION_RULE_INDICES: ReadonlySet<number> = new Set([
     SysMLv2Parser.RULE_specialization,          // 66
@@ -1286,6 +1341,7 @@ export class SymbolTable {
         const typeName = typeNames[0];
         const documentation = this.extractDocumentation(ctx);
         const visibility = this.extractVisibility(ctx);
+        const prefixKeywords = this.extractPrefixKeywords(ctx);
         // Only extract multiplicity for usages
         const { multiplicity, multiplicityRange } = isUsageKind(kind) ? this.extractMultiplicity(ctx) : {};
         // Extract prefix metadata annotations (#name)
@@ -1327,6 +1383,7 @@ export class SymbolTable {
             namingReference,
             documentation,
             visibility,
+            prefixKeywords: prefixKeywords.length > 0 ? prefixKeywords : undefined,
             source: transition?.source,
             target: transition?.target,
             flowDetails,
@@ -1937,6 +1994,40 @@ export class SymbolTable {
         }
 
         return undefined;
+    }
+
+    /**
+     * The keywords of `ctx`'s own prefix and multiplicity part, in written
+     * order (`in`, `abstract`, `constant`, `ref`, `end`, `ordered`, ...),
+     * read only from the rules in `PREFIX_PATH_RULE_INDICES`.
+     */
+    private extractPrefixKeywords(ctx: ParserRuleContext): string[] {
+        const keywords: string[] = [];
+        const visit = (node: ParserRuleContext): void => {
+            for (let i = 0; i < node.getChildCount(); i++) {
+                const child = node.getChild(i);
+                if (child instanceof TerminalNode) {
+                    if (PREFIX_KEYWORD_TOKENS.has(child.symbol.type)) keywords.push(child.getText());
+                    continue;
+                }
+                if (child instanceof ParserRuleContext && PREFIX_PATH_RULE_INDICES.has(child.ruleIndex)) visit(child);
+            }
+        };
+        visit(ctx);
+        return this.isEndOccurrence(ctx) ? ['end', ...keywords] : keywords;
+    }
+
+    /**
+     * Whether `ctx` is the occurrence usage of an `endOccurrenceUsageElement`
+     * (`end part a`), whose `end` precedes the usage's own rule.
+     */
+    private isEndOccurrence(ctx: ParserRuleContext): boolean {
+        let current = ctx.parent;
+        while (current instanceof ParserRuleContext && OCCURRENCE_USAGE_ELEMENT_RULE_INDICES.has(current.ruleIndex)) {
+            current = current.parent;
+        }
+        return current !== ctx.parent && current instanceof ParserRuleContext
+            && current.ruleIndex === SysMLv2Parser.RULE_endOccurrenceUsageElement;
     }
 
     /**

@@ -210,11 +210,14 @@ export interface SysMLElementDTO {
      *   itemType      – Payload type for a flow usage
      *   flowSource    – Source feature path for a flow usage
      *   flowTarget    – Target feature path for a flow usage
-     *   direction     – Port direction: 'in' | 'out' | 'inout'
+     *   direction     – Feature direction: 'in' | 'out' | 'inout'
      *   multiplicity  – Multiplicity string (e.g., "0..1", "1..*")
+     *   ordered       – true when declared `ordered`
+     *   nonunique     – true when declared `nonunique`
      *   documentation – Doc comment text
      *   doc           – Alternative doc field
-     *   modifier      – Element modifiers (abstract, etc.)
+     *   modifier      – Prefix keywords other than the direction, as written
+     *                   (e.g., "abstract", "derived", "constant", "ref", "end")
      *   value         – Default/assigned value
      *   visibility    – 'public' | 'private' | 'protected'
      *   isAnonymous   – true for an element without a name (its `name` is empty)
@@ -364,6 +367,8 @@ export interface ResolvedFeatureDTO {
     direction?: 'in' | 'out' | 'inout';
     visibility?: 'public' | 'private' | 'protected';
     isDerived: boolean;
+    isConstant: boolean;
+    /** @deprecated The pre-KERML_-57 name of `isConstant`, always equal to it; will be removed in a future release. */
     isReadonly: boolean;
 }
 

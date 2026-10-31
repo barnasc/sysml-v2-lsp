@@ -56,7 +56,7 @@ const SYSML_KEYWORDS: { label: string; kind: CompletionItemKind; detail: string;
 
     // Modifiers
     { label: 'abstract', kind: CompletionItemKind.Keyword, detail: 'Abstract modifier', documentation: 'Makes element abstract' },
-    { label: 'readonly', kind: CompletionItemKind.Keyword, detail: 'Readonly modifier', documentation: 'Makes attribute readonly' },
+    { label: 'constant', kind: CompletionItemKind.Keyword, detail: 'Constant modifier', documentation: 'Makes feature constant' },
     { label: 'derived', kind: CompletionItemKind.Keyword, detail: 'Derived modifier', documentation: 'Indicates value is derived/calculated' },
     { label: 'in', kind: CompletionItemKind.Keyword, detail: 'Input direction', documentation: 'Port/parameter receives input' },
     { label: 'out', kind: CompletionItemKind.Keyword, detail: 'Output direction', documentation: 'Port/parameter provides output' },

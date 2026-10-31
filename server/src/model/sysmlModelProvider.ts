@@ -400,10 +400,10 @@ export class SysMLModelProvider {
             attributes['viewRendering'] = symbol.viewRendering;
         }
 
-        // Extract direction for ports from the source text
-        const direction = this.extractDirection(symbol, lines);
-        if (direction) {
-            attributes['direction'] = direction;
+        // Prefix keywords are parsed from the element's own declaration.
+        const prefix = prefixAttributesOf(symbol);
+        if (prefix.direction) {
+            attributes['direction'] = prefix.direction;
         }
 
         // Multiplicity from the element's own declaration, never a nested element's
@@ -411,10 +411,14 @@ export class SysMLModelProvider {
             attributes['multiplicity'] = symbol.multiplicity;
         }
 
-        // Extract modifiers
-        const modifier = this.extractModifier(symbol, lines);
-        if (modifier) {
-            attributes['modifier'] = modifier;
+        if (prefix.modifier) {
+            attributes['modifier'] = prefix.modifier;
+        }
+        if (prefix.ordered) {
+            attributes['ordered'] = true;
+        }
+        if (prefix.nonunique) {
+            attributes['nonunique'] = true;
         }
 
         // Visibility is parsed from the owning membership's MemberPrefix.
@@ -1208,17 +1212,17 @@ export class SysMLModelProvider {
             const features: ResolvedFeatureDTO[] = children
                 .filter(c => isUsage(c.kind))
                 .map(c => {
-                    const modifier = this.extractModifier(c, lines);
-                    const direction = this.extractDirection(c, lines);
+                    const prefix = prefixAttributesOf(c);
                     return {
                         name: c.name,
                         kind: toMetaclassName(c.kind),
                         type: c.typeNames.join(', ') || undefined,
                         multiplicity: c.multiplicity,
-                        direction: direction as 'in' | 'out' | 'inout' | undefined,
+                        direction: prefix.direction,
                         visibility: c.visibility,
-                        isDerived: modifier?.split(', ').includes('derived') ?? false,
-                        isReadonly: modifier?.split(', ').includes('readonly') ?? false,
+                        isDerived: prefix.keywords.includes('derived'),
+                        isConstant: prefix.isConstant,
+                        isReadonly: prefix.isConstant,
                     };
                 });
 
@@ -1378,31 +1382,6 @@ export class SysMLModelProvider {
         const startLine = symbol.range.start.line;
         const endLine = Math.min(symbol.range.end.line, lines.length - 1);
         return lines.slice(startLine, endLine + 1).join('\n');
-    }
-
-    /** Extract port direction (in | out | inout) from source text. */
-    private extractDirection(symbol: SysMLSymbol, lines: string[]): string | undefined {
-        if (symbol.kind !== SysMLElementKind.PortUsage && symbol.kind !== SysMLElementKind.PortDef) {
-            return undefined;
-        }
-        const elementText = this.getElementText(symbol, lines);
-        // Check 'inout' first — it contains 'in' and 'out' as substrings
-        if (containsWord(elementText, 'inout')) return 'inout';
-        if (containsWord(elementText, 'in')) return 'in';
-        if (containsWord(elementText, 'out')) return 'out';
-        return undefined;
-    }
-
-    /** Extract modifiers (abstract, readonly, derived, etc.) from source text. */
-    private extractModifier(symbol: SysMLSymbol, lines: string[]): string | undefined {
-        const elementText = this.getElementText(symbol, lines);
-        const modifiers: string[] = [];
-        if (containsWord(elementText, 'abstract')) modifiers.push('abstract');
-        if (containsWord(elementText, 'readonly')) modifiers.push('readonly');
-        if (containsWord(elementText, 'derived')) modifiers.push('derived');
-        if (containsWord(elementText, 'variation')) modifiers.push('variation');
-        if (containsWord(elementText, 'individual')) modifiers.push('individual');
-        return modifiers.length > 0 ? modifiers.join(', ') : undefined;
     }
 
     /** Extract default/assigned value from source text. */
@@ -1939,4 +1918,33 @@ export class SysMLModelProvider {
             range: this.rangeToDTO(symbol.range),
         };
     }
+}
+
+const DIRECTIONS: ReadonlySet<string> = new Set(['in', 'out', 'inout']);
+const MULTIPLICITY_KEYWORDS: ReadonlySet<string> = new Set(['ordered', 'nonunique']);
+
+/**
+ * An element's prefix as `sysml/model` attributes (SysML 8.2.2.6.2 `RefPrefix`,
+ * `BasicUsagePrefix`, 8.2.2.6.6 `MultiplicityPart`): its direction, its other
+ * prefix keywords as written (`modifier`), and `ordered`/`nonunique`.
+ */
+function prefixAttributesOf(symbol: SysMLSymbol): {
+    keywords: string[];
+    direction?: 'in' | 'out' | 'inout';
+    modifier?: string;
+    isConstant: boolean;
+    ordered: boolean;
+    nonunique: boolean;
+} {
+    const keywords = symbol.prefixKeywords ?? [];
+    const direction = keywords.find(keyword => DIRECTIONS.has(keyword)) as 'in' | 'out' | 'inout' | undefined;
+    const modifiers = keywords.filter(keyword => !DIRECTIONS.has(keyword) && !MULTIPLICITY_KEYWORDS.has(keyword));
+    return {
+        keywords,
+        direction,
+        modifier: modifiers.length > 0 ? modifiers.join(', ') : undefined,
+        isConstant: keywords.includes('constant'),
+        ordered: keywords.includes('ordered'),
+        nonunique: keywords.includes('nonunique'),
+    };
 }

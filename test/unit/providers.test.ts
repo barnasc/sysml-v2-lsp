@@ -1505,6 +1505,20 @@ describe('Completion Provider', () => {
         expect(labels).toContain('import');
     });
 
+    it('should offer constant, not readonly, as a modifier (KERML_-57)', async () => {
+        const { CompletionProvider } = await import('../../server/src/providers/completionProvider.js');
+        const { dm } = await setup(VEHICLE_TEXT);
+
+        const provider = new CompletionProvider(dm);
+        const labels = provider.provideCompletions({
+            textDocument: { uri: 'test://test.sysml' },
+            position: { line: 1, character: 4 },
+        }).map(i => i.label);
+
+        expect(labels).toContain('constant');
+        expect(labels).not.toContain('readonly');
+    });
+
     it('should include snippet insert text for definitions', async () => {
         const { CompletionProvider } = await import('../../server/src/providers/completionProvider.js');
         const { InsertTextFormat } = await import('vscode-languageserver/node');
